@@ -75,12 +75,14 @@ std::unique_ptr<OutputShader> OutputShader::make_shader(const char *fragment_met
 
 		"uniform %s texID;"
 		"uniform float gamma;"
+		"uniform float alphaMultiplier;"
 
 		"\n%s\n"
 
 		"void main(void)"
 		"{"
-			"fragColour = vec4(pow(%s, vec3(gamma)), 0.5);"//*cos(lateralVarying)
+			"float alpha = 0.5*clamp(alphaMultiplier * cos(lateralVarying), 0.0, 1.0);"
+			"fragColour = vec4(pow(%s, vec3(gamma)), alpha);"
 		"}",
 	sampler_type, fragment_methods, colour_expression);
 
@@ -100,6 +102,15 @@ void OutputShader::set_output_size(unsigned int output_width, unsigned int outpu
 
 	set_uniform("boundsOrigin", (GLfloat)visible_area.origin.x, (GLfloat)visible_area.origin.y);
 	set_uniform("boundsSize", (GLfloat)visible_area.size.width, (GLfloat)visible_area.size.height);
+
+	// This is a very broad low-pass filter: disable the (very subtle, but justified*) scanline effect if output is
+	// below 700px.
+	//
+	// * justification is partly based on the very slightly overlaps between adjacent lines that rounding errors bring,
+	// partly on the real physics of an electron gun. But here it's portrayed using very close to ideal electronics.
+	// Most people won't be aware that an effect is being applied, but the visible double-hits of not applying slight
+	// fading can be very obvious.
+	set_uniform("alphaMultiplier", (output_height > 700) ? 1.0f : 256.0f);
 }
 
 void OutputShader::set_source_texture_unit(GLenum unit) {
