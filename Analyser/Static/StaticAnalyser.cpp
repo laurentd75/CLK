@@ -23,6 +23,7 @@
 #include "Coleco/StaticAnalyser.hpp"
 #include "Commodore/StaticAnalyser.hpp"
 #include "DiskII/StaticAnalyser.hpp"
+#include "Enterprise/StaticAnalyser.hpp"
 #include "Macintosh/StaticAnalyser.hpp"
 #include "MSX/StaticAnalyser.hpp"
 #include "Oric/StaticAnalyser.hpp"
@@ -43,9 +44,9 @@
 #include "../../Storage/Disk/DiskImage/Formats/MacintoshIMG.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/G64.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/DMK.hpp"
+#include "../../Storage/Disk/DiskImage/Formats/FAT12.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/HFE.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/MSA.hpp"
-#include "../../Storage/Disk/DiskImage/Formats/MSXDSK.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/NIB.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/OricMFMDSK.hpp"
 #include "../../Storage/Disk/DiskImage/Formats/SSD.hpp"
@@ -55,7 +56,13 @@
 
 // Mass Storage Devices (i.e. usually, hard disks)
 #include "../../Storage/MassStorage/Formats/DAT.hpp"
+#include "../../Storage/MassStorage/Formats/DSK.hpp"
 #include "../../Storage/MassStorage/Formats/HFV.hpp"
+
+// State Snapshots
+#include "../../Storage/State/SNA.hpp"
+#include "../../Storage/State/SZX.hpp"
+#include "../../Storage/State/Z80.hpp"
 
 // Tapes
 #include "../../Storage/Tape/Formats/CAS.hpp"
@@ -73,15 +80,23 @@
 
 using namespace Analyser::Static;
 
-static Media GetMediaAndPlatforms(const std::string &file_name, TargetPlatform::IntType &potential_platforms) {
-	Media result;
+namespace {
 
+std::string get_extension(const std::string &name) {
 	// Get the extension, if any; it will be assumed that extensions are reliable, so an extension is a broad-phase
 	// test as to file format.
-	std::string::size_type final_dot = file_name.find_last_of(".");
-	if(final_dot == std::string::npos) return result;
-	std::string extension = file_name.substr(final_dot + 1);
+	std::string::size_type final_dot = name.find_last_of(".");
+	if(final_dot == std::string::npos) return name;
+	std::string extension = name.substr(final_dot + 1);
 	std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+	return extension;
+}
+
+}
+
+static Media GetMediaAndPlatforms(const std::string &file_name, TargetPlatform::IntType &potential_platforms) {
+	Media result;
+	const std::string extension = get_extension(file_name);
 
 #define InsertInstance(list, instance, platforms) \
 	list.emplace_back(instance);\
@@ -131,8 +146,9 @@ static Media GetMediaAndPlatforms(const std::string &file_name, TargetPlatform::
 			TargetPlatform::AmstradCPC | TargetPlatform::Oric | TargetPlatform::ZXSpectrum)						// DSK (Amstrad CPC, etc)
 	Format("dsk", result.disks, Disk::DiskImageHolder<Storage::Disk::AppleDSK>, TargetPlatform::DiskII)			// DSK (Apple II)
 	Format("dsk", result.disks, Disk::DiskImageHolder<Storage::Disk::MacintoshIMG>, TargetPlatform::Macintosh)	// DSK (Macintosh, floppy disk)
-	Format("dsk", result.mass_storage_devices, MassStorage::HFV, TargetPlatform::Macintosh)						// DSK (Macintosh, hard disk)
-	Format("dsk", result.disks, Disk::DiskImageHolder<Storage::Disk::MSXDSK>, TargetPlatform::MSX)				// DSK (MSX)
+	Format("dsk", result.mass_storage_devices, MassStorage::HFV, TargetPlatform::Macintosh)						// DSK (Macintosh, hard disk, single volume image)
+	Format("dsk", result.mass_storage_devices, MassStorage::DSK, TargetPlatform::Macintosh)						// DSK (Macintosh, hard disk, full device image)
+	Format("dsk", result.disks, Disk::DiskImageHolder<Storage::Disk::FAT12>, TargetPlatform::MSX)				// DSK (MSX)
 	Format("dsk", result.disks, Disk::DiskImageHolder<Storage::Disk::OricMFMDSK>, TargetPlatform::Oric)			// DSK (Oric)
 	Format("g64", result.disks, Disk::DiskImageHolder<Storage::Disk::G64>, TargetPlatform::Commodore)			// G64
 	Format(	"hfe",
@@ -142,6 +158,7 @@ static Media GetMediaAndPlatforms(const std::string &file_name, TargetPlatform::
 			// HFE (TODO: switch to AllDisk once the MSX stops being so greedy)
 	Format("img", result.disks, Disk::DiskImageHolder<Storage::Disk::MacintoshIMG>, TargetPlatform::Macintosh)		// IMG (DiskCopy 4.2)
 	Format("image", result.disks, Disk::DiskImageHolder<Storage::Disk::MacintoshIMG>, TargetPlatform::Macintosh)	// IMG (DiskCopy 4.2)
+	Format("img", result.disks, Disk::DiskImageHolder<Storage::Disk::FAT12>, TargetPlatform::Enterprise)		// IMG (Enterprise/MS-DOS style)
 	Format("msa", result.disks, Disk::DiskImageHolder<Storage::Disk::MSA>, TargetPlatform::AtariST)				// MSA
 	Format("nib", result.disks, Disk::DiskImageHolder<Storage::Disk::NIB>, TargetPlatform::DiskII)				// NIB
 	Format("o", result.tapes, Tape::ZX80O81P, TargetPlatform::ZX8081)											// O
@@ -199,14 +216,35 @@ Media Analyser::Static::GetMedia(const std::string &file_name) {
 
 TargetList Analyser::Static::GetTargets(const std::string &file_name) {
 	TargetList targets;
+	const std::string extension = get_extension(file_name);
 
+	// Check whether the file directly identifies a target; if so then just return that.
+#define Format(ext, class) 											\
+	if(extension == ext)	{										\
+		try {														\
+			auto target = Storage::State::class::load(file_name);	\
+			if(target) {											\
+				targets.push_back(std::move(target));				\
+				return targets;										\
+			}														\
+		} catch(...) {}												\
+	}
+
+	Format("sna", SNA);
+	Format("szx", SZX);
+	Format("z80", Z80);
+
+#undef TryInsert
+
+	// Otherwise:
+	//
 	// Collect all disks, tapes ROMs, etc as can be extrapolated from this file, forming the
 	// union of all platforms this file might be a target for.
 	TargetPlatform::IntType potential_platforms = 0;
 	Media media = GetMediaAndPlatforms(file_name, potential_platforms);
 
-	// Hand off to platform-specific determination of whether these things are actually compatible and,
-	// if so, how to load them.
+	// Hand off to platform-specific determination of whether these
+	// things are actually compatible and, if so, how to load them.
 #define Append(x) if(potential_platforms & TargetPlatform::x) {\
 	auto new_targets = x::GetTargets(media, file_name, potential_platforms);\
 	std::move(new_targets.begin(), new_targets.end(), std::back_inserter(targets));\
@@ -220,6 +258,7 @@ TargetList Analyser::Static::GetTargets(const std::string &file_name) {
 	Append(Coleco);
 	Append(Commodore);
 	Append(DiskII);
+	Append(Enterprise);
 	Append(Macintosh);
 	Append(MSX);
 	Append(Oric);

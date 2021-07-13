@@ -40,6 +40,45 @@
 #include <memory>
 #include <vector>
 
+namespace {
+
+/*!
+	Provides an Altai-style joystick.
+*/
+class Joystick: public Inputs::ConcreteJoystick {
+	public:
+		Joystick() :
+			ConcreteJoystick({
+				Input(Input::Up),
+				Input(Input::Down),
+				Input(Input::Left),
+				Input(Input::Right),
+				Input(Input::Fire)
+			}) {}
+
+		void did_set_input(const Input &digital_input, bool is_active) final {
+#define APPLY(b)	if(is_active) state_ &= ~b; else state_ |= b;
+			switch(digital_input.type) {
+				default: return;
+				case Input::Right:	APPLY(0x02);	break;
+				case Input::Left:	APPLY(0x01);	break;
+				case Input::Down:	APPLY(0x08);	break;
+				case Input::Up:		APPLY(0x10);	break;
+				case Input::Fire:	APPLY(0x20);	break;
+			}
+#undef APPLY
+		}
+
+		uint8_t get_state() {
+			return state_;
+		}
+
+	private:
+		uint8_t state_ = 0xff;
+};
+
+}
+
 namespace Oric {
 
 using DiskInterface = Analyser::Static::Oric::Target::DiskInterface;
@@ -140,7 +179,12 @@ class TapePlayer: public Storage::Tape::BinaryTapePlayer {
 class VIAPortHandler: public MOS::MOS6522::IRQDelegatePortHandler {
 	public:
 		VIAPortHandler(Concurrency::DeferringAsyncTaskQueue &audio_queue, AY &ay8910, Speaker &speaker, TapePlayer &tape_player, Keyboard &keyboard) :
-			audio_queue_(audio_queue), ay8910_(ay8910), speaker_(speaker), tape_player_(tape_player), keyboard_(keyboard) {}
+			audio_queue_(audio_queue), ay8910_(ay8910), speaker_(speaker), tape_player_(tape_player), keyboard_(keyboard)
+		{
+			// Attach a couple of joysticks.
+			joysticks_.emplace_back(new Joystick);
+			joysticks_.emplace_back(new Joystick);
+		}
 
 		/*!
 			Reponds to the 6522's control line output change signal; on an Oric A2 is connected to
@@ -165,6 +209,7 @@ class VIAPortHandler: public MOS::MOS6522::IRQDelegatePortHandler {
 			} else {
 				update_ay();
 				ay8910_.set_data_input(value);
+				porta_output_ = value;
 			}
 		}
 
@@ -176,7 +221,10 @@ class VIAPortHandler: public MOS::MOS6522::IRQDelegatePortHandler {
 				uint8_t column = ay8910_.get_port_output(false) ^ 0xff;
 				return keyboard_.query_column(column) ? 0x08 : 0x00;
 			} else {
-				return ay8910_.get_data_output();
+				uint8_t result = ay8910_.get_data_output();
+				if(porta_output_ & 0x40) result &= static_cast<Joystick *>(joysticks_[0].get())->get_state();
+				if(porta_output_ & 0x80) result &= static_cast<Joystick *>(joysticks_[1].get())->get_state();
+				return result;
 			}
 		}
 
@@ -193,12 +241,17 @@ class VIAPortHandler: public MOS::MOS6522::IRQDelegatePortHandler {
 			audio_queue_.perform();
 		}
 
+		const std::vector<std::unique_ptr<Inputs::Joystick>> &get_joysticks() {
+			return joysticks_;
+		}
+
 	private:
 		void update_ay() {
 			speaker_.run_for(audio_queue_, cycles_since_ay_update_.flush<Cycles>());
 		}
 		bool ay_bdir_ = false;
 		bool ay_bc1_ = false;
+		uint8_t porta_output_ = 0xff;
 		HalfCycles cycles_since_ay_update_;
 
 		Concurrency::DeferringAsyncTaskQueue &audio_queue_;
@@ -206,12 +259,15 @@ class VIAPortHandler: public MOS::MOS6522::IRQDelegatePortHandler {
 		Speaker &speaker_;
 		TapePlayer &tape_player_;
 		Keyboard &keyboard_;
+
+		std::vector<std::unique_ptr<Inputs::Joystick>> joysticks_;
 };
 
 template <Analyser::Static::Oric::Target::DiskInterface disk_interface, CPU::MOS6502Esque::Type processor_type> class ConcreteMachine:
 	public MachineTypes::TimedMachine,
 	public MachineTypes::ScanProducer,
 	public MachineTypes::AudioProducer,
+	public MachineTypes::JoystickMachine,
 	public MachineTypes::MediaTarget,
 	public MachineTypes::MappedKeyboardMachine,
 	public Configurable::Device,
@@ -248,73 +304,64 @@ template <Analyser::Static::Oric::Target::DiskInterface disk_interface, CPU::MOS
 				ram_[c] |= 0x40;
 			}
 
-			const std::string machine_name = "Oric";
-			std::vector<ROMMachine::ROM> rom_names = { {machine_name, "the Oric colour ROM", "colour.rom", 128, 0xd50fca65} };
+			::ROM::Request request = ::ROM::Request(::ROM::Name::OricColourROM, true);
+			::ROM::Name basic;
 			switch(target.rom) {
-				case Analyser::Static::Oric::Target::ROM::BASIC10:
-					rom_names.emplace_back(machine_name, "Oric BASIC 1.0", "basic10.rom", 16*1024, 0xf18710b4);
-				break;
-				case Analyser::Static::Oric::Target::ROM::BASIC11:
-					rom_names.emplace_back(machine_name, "Oric BASIC 1.1", "basic11.rom", 16*1024, 0xc3a92bef);
-				break;
-				case Analyser::Static::Oric::Target::ROM::Pravetz:
-					rom_names.emplace_back(machine_name, "Pravetz BASIC", "pravetz.rom", 16*1024, 0x58079502);
-				break;
+				case Analyser::Static::Oric::Target::ROM::BASIC10:	basic = ::ROM::Name::OricBASIC10;		break;
+				default:
+				case Analyser::Static::Oric::Target::ROM::BASIC11:	basic = ::ROM::Name::OricBASIC11;		break;
+				case Analyser::Static::Oric::Target::ROM::Pravetz:	basic = ::ROM::Name::OricPravetzBASIC;	break;
 			}
-			size_t diskii_state_machine_index = 0;
+			request = request && ::ROM::Request(basic);
+
 			switch(disk_interface) {
 				default: break;
 				case DiskInterface::BD500:
-					rom_names.emplace_back(machine_name, "the Oric Byte Drive 500 ROM", "bd500.rom", 8*1024, 0x61952e34);
+					request = request && ::ROM::Request(::ROM::Name::OricByteDrive500);
 				break;
 				case DiskInterface::Jasmin:
-					rom_names.emplace_back(machine_name, "the Oric Jasmin ROM", "jasmin.rom", 2*1024, 0x37220e89);
+					request = request && ::ROM::Request(::ROM::Name::OricJasmin);
 				break;
 				case DiskInterface::Microdisc:
-					rom_names.emplace_back(machine_name, "the Oric Microdisc ROM", "microdisc.rom", 8*1024, 0xa9664a9c);
+					request = request && ::ROM::Request(::ROM::Name::OricMicrodisc);
 				break;
 				case DiskInterface::Pravetz:
-					rom_names.emplace_back(machine_name, "the 8DOS boot ROM", "8dos.rom", 512, 0x49a74c06);
-					// These ROM details are coupled with those in the DiskIICard.
-					diskii_state_machine_index = rom_names.size();
-					rom_names.push_back({"DiskII", "the Disk II 16-sector state machine ROM", "state-machine-16.rom", 256, { 0x9796a238, 0xb72a2c70 }});
+					request = request && ::ROM::Request(::ROM::Name::Oric8DOSBoot) && ::ROM::Request(::ROM::Name::DiskIIStateMachine16Sector);
 				break;
 			}
 
-			const auto roms = rom_fetcher(rom_names);
-
-			for(std::size_t index = 0; index < roms.size(); ++index) {
-				if(!roms[index]) {
-					throw ROMMachine::Error::MissingROMs;
-				}
+			auto roms = rom_fetcher(request);
+			if(!request.validate(roms)) {
+				throw ROMMachine::Error::MissingROMs;
 			}
 
-			video_->set_colour_rom(*roms[0]);
-			rom_ = std::move(*roms[1]);
+			// The colour ROM is optional; an alternative composite encoding can be used if
+			// it is absent.
+			const auto colour_rom = roms.find(::ROM::Name::OricColourROM);
+			if(colour_rom != roms.end()) {
+				video_->set_colour_rom(colour_rom->second);
+			}
+			rom_ = std::move(roms.find(basic)->second);
 
 			switch(disk_interface) {
 				default: break;
 				case DiskInterface::BD500:
-					disk_rom_ = std::move(*roms[2]);
-					disk_rom_.resize(8192);
+					disk_rom_ = std::move(roms.find(::ROM::Name::OricByteDrive500)->second);
 				break;
 				case DiskInterface::Jasmin:
-					disk_rom_ = std::move(*roms[2]);
-					disk_rom_.resize(2048);
+					disk_rom_ = std::move(roms.find(::ROM::Name::OricJasmin)->second);
 				break;
 				case DiskInterface::Microdisc:
-					disk_rom_ = std::move(*roms[2]);
-					disk_rom_.resize(8192);
+					disk_rom_ = std::move(roms.find(::ROM::Name::OricMicrodisc)->second);
 				break;
 				case DiskInterface::Pravetz: {
-					pravetz_rom_ = std::move(*roms[2]);
+					pravetz_rom_ = std::move(roms.find(::ROM::Name::Oric8DOSBoot)->second);
 					pravetz_rom_.resize(512);
 
-					diskii_->set_state_machine(*roms[diskii_state_machine_index]);
+					diskii_->set_state_machine(roms.find(::ROM::Name::DiskIIStateMachine16Sector)->second);
 				} break;
 			}
 
-			rom_.resize(16384);
 			paged_rom_ = rom_.data();
 
 			switch(target.disk_interface) {
@@ -731,8 +778,13 @@ template <Analyser::Static::Oric::Target::DiskInterface disk_interface, CPU::MOS
 			}
 		}
 
-		// MARK - typing
+		// MARK: - typing
 		std::unique_ptr<Utility::StringSerialiser> string_serialiser_;
+
+		// MARK: - Joysticks
+		const std::vector<std::unique_ptr<Inputs::Joystick>> &get_joysticks() override {
+			return via_port_handler_.get_joysticks();
+		}
 };
 
 }

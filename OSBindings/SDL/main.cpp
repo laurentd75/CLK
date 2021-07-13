@@ -470,13 +470,56 @@ class DynamicWindowTitler {
 			update_window_title();
 		}
 
+		void set_file_name(const std::string &name) {
+			file_name_ = name;
+			update_window_title();
+		}
+
 	private:
 		void update_window_title() {
 			SDL_SetWindowTitle(window_, window_title().c_str());
 		}
 		bool mouse_is_captured_ = false;
 		SDL_Window *window_ = nullptr;
-		const std::string file_name_;
+		std::string file_name_;
+};
+
+/*!
+	Provides a wrapper for SDL_Joystick pointers that can keep track
+	of historic hat values.
+*/
+class SDLJoystick {
+	public:
+		SDLJoystick(SDL_Joystick *joystick) : joystick_(joystick) {
+			hat_values_.resize(SDL_JoystickNumHats(joystick));
+		}
+
+		~SDLJoystick() {
+			SDL_JoystickClose(joystick_);
+		}
+
+		/// @returns The underlying SDL_Joystick.
+		SDL_Joystick *get() {
+			return joystick_;
+		}
+
+		/// @returns A reference to the storage for the previous state of hat @c c.
+		Uint8 &last_hat_value(int c) {
+			return hat_values_[c];
+		}
+
+		/// @returns The logic OR of all stored hat states.
+		Uint8 hat_values() {
+			Uint8 value = 0;
+			for(const auto hat_value: hat_values_) {
+				value |= hat_value;
+			}
+			return value;
+		}
+
+	private:
+		SDL_Joystick *joystick_;
+		std::vector<Uint8> hat_values_;
 };
 
 }
@@ -651,11 +694,10 @@ int main(int argc, char *argv[]) {
 	//	/usr/local/share/CLK/[system];
 	//	/usr/share/CLK/[system]; or
 	//	[user-supplied path]/[system]
-	std::vector<ROMMachine::ROM> requested_roms;
-	ROMMachine::ROMFetcher rom_fetcher = [&requested_roms, &arguments]
-		(const std::vector<ROMMachine::ROM> &roms) -> std::vector<std::unique_ptr<std::vector<uint8_t>>> {
-			requested_roms.insert(requested_roms.end(), roms.begin(), roms.end());
-
+	ROM::Request missing_roms;
+	std::vector<std::string> checked_paths;
+	ROMMachine::ROMFetcher rom_fetcher = [&missing_roms, &arguments, &checked_paths]
+		(const ROM::Request &roms) -> ROM::Map {
 			std::vector<std::string> paths = {
 				"/usr/local/share/CLK/",
 				"/usr/share/CLK/"
@@ -663,41 +705,56 @@ int main(int argc, char *argv[]) {
 
 			const auto rompath = arguments.selections.find("rompath");
 			if(rompath != arguments.selections.end()) {
-				if(rompath->second.back() != '/') {
-					paths.push_back(rompath->second + "/");
-				} else {
-					paths.push_back(rompath->second);
+				std::string path = rompath->second;
+
+				// Ensure the path ends in a slash.
+				if(path.back() != '/') {
+					path += '/';
+				}
+
+				// If ~ is present, expand it to %HOME%.
+				const size_t tilde_position = path.find("~");
+				if(tilde_position != std::string::npos) {
+					path.replace(tilde_position, 1, getenv("HOME"));
+				}
+
+				paths.push_back(path);
+			}
+
+			ROM::Map results;
+			for(const auto &description: roms.all_descriptions()) {
+				for(const auto &file_name: description.file_names) {
+					FILE *file = nullptr;
+					std::vector<std::string> rom_checked_paths;
+					for(const auto &path: paths) {
+						std::string local_path = path + description.machine_name + "/" + file_name;
+						file = std::fopen(local_path.c_str(), "rb");
+						rom_checked_paths.push_back(local_path);
+						if(file) break;
+					}
+
+					if(!file) {
+						std::copy(rom_checked_paths.begin(), rom_checked_paths.end(), std::back_inserter(checked_paths));
+						continue;
+					}
+
+					std::vector<uint8_t> data;
+
+					std::fseek(file, 0, SEEK_END);
+					data.resize(std::ftell(file));
+					std::fseek(file, 0, SEEK_SET);
+					std::size_t read = fread(data.data(), 1, data.size(), file);
+					std::fclose(file);
+
+					if(read == data.size()) {
+						results[description.name] = std::move(data);
+					} else {
+						std::copy(rom_checked_paths.begin(), rom_checked_paths.end(), std::back_inserter(checked_paths));
+					}
 				}
 			}
 
-			std::vector<std::unique_ptr<std::vector<uint8_t>>> results;
-			for(const auto &rom: roms) {
-				FILE *file = nullptr;
-				for(const auto &path: paths) {
-					std::string local_path = path + rom.machine_name + "/" + rom.file_name;
-					file = std::fopen(local_path.c_str(), "rb");
-					if(file) break;
-				}
-
-				if(!file) {
-					results.emplace_back(nullptr);
-					continue;
-				}
-
-				auto data = std::make_unique<std::vector<uint8_t>>();
-
-				std::fseek(file, 0, SEEK_END);
-				data->resize(std::ftell(file));
-				std::fseek(file, 0, SEEK_SET);
-				std::size_t read = fread(data->data(), 1, data->size(), file);
-				std::fclose(file);
-
-				if(read == data->size())
-					results.emplace_back(std::move(data));
-				else
-					results.emplace_back(nullptr);
-			}
-
+			missing_roms = roms.subtract(results);
 			return results;
 		};
 
@@ -715,24 +772,22 @@ int main(int argc, char *argv[]) {
 	if(!machine) {
 		switch(error) {
 			default: break;
-			case ::Machine::Error::MissingROM:
-				std::cerr << "Could not find system ROMs; please install to /usr/local/share/CLK/ or /usr/share/CLK/, or provide a --rompath." << std::endl;
-				std::cerr << "One or more of the following was needed but not found:" << std::endl;
-				for(const auto &rom: requested_roms) {
-					std::cerr << rom.machine_name << '/' << rom.file_name << " (";
-					if(!rom.descriptive_name.empty()) {
-						std::cerr << rom.descriptive_name << "; ";
-					}
-					std::cerr << "accepted crc32s: ";
-					bool is_first = true;
-					for(const auto crc32: rom.crc32s) {
-						if(!is_first) std::cerr << ", ";
-						is_first = false;
-						std::cerr << std::hex << std::setfill('0') << std::setw(8) << crc32;
-					}
-					std::cerr << ")" << std::endl;
+			case ::Machine::Error::MissingROM: {
+				std::cerr << "Could not find system ROMs; please install to /usr/local/share/CLK/ or /usr/share/CLK/, or provide a --rompath, e.g. --rompath=~/ROMs." << std::endl;
+				std::cerr << "Needed but didn't find";
+
+				using DescriptionFlag = ROM::Description::DescriptionFlag;
+				std::wcerr << missing_roms.description(DescriptionFlag::Filename | DescriptionFlag::CRC, L'*');
+
+				std::cerr << std::endl << std::endl << "Searched unsuccessfully: ";
+				bool is_first = true;
+				for(const auto &path: checked_paths) {
+					if(!is_first) std::cerr << "; ";
+					std::cerr << path;
+					is_first = false;
 				}
-			break;
+				std::cerr << std::endl;
+			} break;
 		}
 
 		return EXIT_FAILURE;
@@ -777,8 +832,11 @@ int main(int argc, char *argv[]) {
 			} else if(volume < 0.0 || volume > 1.0) {
 				std::cerr << "Cannot run with volume " << volume_string << "; volumes must be between 0.0 and 1.0." << std::endl;
 			} else {
-				const auto speaker = machine->audio_producer()->get_speaker();
-				if(speaker) speaker->set_output_volume(volume);
+				const auto audio_producer = machine->audio_producer();
+				if(audio_producer) {
+					const auto speaker = machine->audio_producer()->get_speaker();
+					if(speaker) speaker->set_output_volume(volume);
+				}
 			}
 		}
 	}
@@ -790,10 +848,6 @@ int main(int argc, char *argv[]) {
 	if(logical_keyboard) {
 		SDL_StartTextInput();
 	}
-
-	// Wire up the best-effort updater, its delegate, and the speaker delegate.
-	machine_runner.machine = machine.get();
-	machine_runner.machine_mutex = &machine_mutex;
 
 	// Ensure all media is inserted, if this machine accepts it.
 	{
@@ -844,90 +898,72 @@ int main(int argc, char *argv[]) {
 
 	// Setup output, assuming a CRT machine for now, and prepare a best-effort updater.
 	Outputs::Display::OpenGL::ScanTarget scan_target(target_framebuffer);
-	machine->scan_producer()->set_scan_target(&scan_target);
+	std::unique_ptr<ActivityObserver> activity_observer;
+	bool uses_mouse;
+	std::vector<SDLJoystick> joysticks;
 
-	// For now, lie about audio output intentions.
-	auto speaker = machine->audio_producer()->get_speaker();
-	if(speaker) {
-		// Create an audio pipe.
-		SDL_AudioSpec desired_audio_spec;
-		SDL_AudioSpec obtained_audio_spec;
+	machine_runner.machine_mutex = &machine_mutex;
+	const auto setup_machine_input_output = [&scan_target, &machine, &speaker_delegate, &activity_observer, &joysticks, &uses_mouse, &machine_runner] {
+		// Wire up the best-effort updater, its delegate, and the speaker delegate.
+		machine_runner.machine = machine.get();
 
-		SDL_zero(desired_audio_spec);
-		desired_audio_spec.freq = 48000;	// TODO: how can I get SDL to reveal the output rate of this machine?
-		desired_audio_spec.format = AUDIO_S16;
-		desired_audio_spec.channels = 1 + int(speaker->get_is_stereo());
-		desired_audio_spec.samples = Uint16(SpeakerDelegate::buffered_samples);
-		desired_audio_spec.callback = SpeakerDelegate::SDL_audio_callback;
-		desired_audio_spec.userdata = &speaker_delegate;
+		machine->scan_producer()->set_scan_target(&scan_target);
 
-		speaker_delegate.audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired_audio_spec, &obtained_audio_spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+		// For now, lie about audio output intentions.
+		const auto audio_producer = machine->audio_producer();
+		if(audio_producer) {
+			auto speaker = audio_producer->get_speaker();
+			if(speaker) {
+				// Create an audio pipe.
+				SDL_AudioSpec desired_audio_spec;
+				SDL_AudioSpec obtained_audio_spec;
 
-		speaker->set_output_rate(obtained_audio_spec.freq, desired_audio_spec.samples, obtained_audio_spec.channels == 2);
-		speaker_delegate.is_stereo = obtained_audio_spec.channels == 2;
-		speaker->set_delegate(&speaker_delegate);
-		SDL_PauseAudioDevice(speaker_delegate.audio_device, 0);
-	}
+				SDL_zero(desired_audio_spec);
+				desired_audio_spec.freq = 48000;	// TODO: how can I get SDL to reveal the output rate of this machine?
+				desired_audio_spec.format = AUDIO_S16;
+				desired_audio_spec.channels = 1 + int(speaker->get_is_stereo());
+				desired_audio_spec.samples = Uint16(SpeakerDelegate::buffered_samples);
+				desired_audio_spec.callback = SpeakerDelegate::SDL_audio_callback;
+				desired_audio_spec.userdata = &speaker_delegate;
+
+				speaker_delegate.audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired_audio_spec, &obtained_audio_spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+
+				speaker->set_output_rate(obtained_audio_spec.freq, desired_audio_spec.samples, obtained_audio_spec.channels == 2);
+				speaker_delegate.is_stereo = obtained_audio_spec.channels == 2;
+				speaker->set_delegate(&speaker_delegate);
+				SDL_PauseAudioDevice(speaker_delegate.audio_device, 0);
+			}
+		}
+
+		/*
+			If the machine offers anything for activity observation,
+			create and register an activity observer.
+		*/
+		Activity::Source *const activity_source = machine->activity_source();
+		if(activity_source) {
+			activity_observer = std::make_unique<ActivityObserver>(activity_source, 4.0f / 3.0f);
+		} else {
+			activity_observer = nullptr;
+		}
+
+		// If this is a joystick machine, check for and open attached joysticks.
+		const auto joystick_machine = machine->joystick_machine();
+		if(joystick_machine) {
+			SDL_InitSubSystem(SDL_INIT_JOYSTICK);
+			for(int c = 0; c < SDL_NumJoysticks(); ++c) {
+				joysticks.emplace_back(SDL_JoystickOpen(c));
+			}
+		} else {
+			joysticks.clear();
+		}
+
+		// Keep a record of whether mouse events can be forwarded.
+		uses_mouse = !!machine->mouse_machine();
+	};
+	setup_machine_input_output();
 
 	int window_width, window_height;
 	SDL_GetWindowSize(window, &window_width, &window_height);
-
-	// If this is a joystick machine, check for and open attached joysticks.
-	/*!
-		Provides a wrapper for SDL_Joystick pointers that can keep track
-		of historic hat values.
-	*/
-	class SDLJoystick {
-		public:
-			SDLJoystick(SDL_Joystick *joystick) : joystick_(joystick) {
-				hat_values_.resize(SDL_JoystickNumHats(joystick));
-			}
-
-			~SDLJoystick() {
-				SDL_JoystickClose(joystick_);
-			}
-
-			/// @returns The underlying SDL_Joystick.
-			SDL_Joystick *get() {
-				return joystick_;
-			}
-
-			/// @returns A reference to the storage for the previous state of hat @c c.
-			Uint8 &last_hat_value(int c) {
-				return hat_values_[c];
-			}
-
-			/// @returns The logic OR of all stored hat states.
-			Uint8 hat_values() {
-				Uint8 value = 0;
-				for(const auto hat_value: hat_values_) {
-					value |= hat_value;
-				}
-				return value;
-			}
-
-		private:
-			SDL_Joystick *joystick_;
-			std::vector<Uint8> hat_values_;
-	};
-	std::vector<SDLJoystick> joysticks;
-	const auto joystick_machine = machine->joystick_machine();
-	if(joystick_machine) {
-		SDL_InitSubSystem(SDL_INIT_JOYSTICK);
-		for(int c = 0; c < SDL_NumJoysticks(); ++c) {
-			joysticks.emplace_back(SDL_JoystickOpen(c));
-		}
-	}
-
-	/*
-		If the machine offers anything for activity observation,
-		create and register an activity observer.
-	*/
-	std::unique_ptr<ActivityObserver> activity_observer;
-	Activity::Source *const activity_source = machine->activity_source();
-	if(activity_source) {
-		activity_observer = std::make_unique<ActivityObserver>(activity_source, 4.0f / 3.0f);
-	}
 
 	// SDL 2.x delivers key up/down events and text inputs separately even when they're correlated;
 	// this struct and map is used to correlate them by time.
@@ -945,7 +981,6 @@ int main(int argc, char *argv[]) {
 	std::vector<KeyPress> keypresses;
 
 	// Run the main event loop until the OS tells us to quit.
-	const bool uses_mouse = !!machine->mouse_machine();
 	bool should_quit = false;
 	Uint32 fullscreen_mode = 0;
 	machine_runner.start();
@@ -987,8 +1022,26 @@ int main(int argc, char *argv[]) {
 				break;
 
 				case SDL_DROPFILE: {
-					Analyser::Static::Media media = Analyser::Static::GetMedia(event.drop.file);
-					machine->media_target()->insert_media(media);
+					const Analyser::Static::Media media = Analyser::Static::GetMedia(event.drop.file);
+
+					// If the new file is only media, insert it; if it is a state snapshot then
+					// tear down the entire machine and replace it.
+					if(!media.empty()) {
+						machine->media_target()->insert_media(media);
+						break;
+					}
+
+					targets = Analyser::Static::GetTargets(event.drop.file);
+					if(targets.empty()) break;
+
+					::Machine::Error error;
+					std::unique_ptr<::Machine::DynamicMachine> new_machine(::Machine::MachineForTargets(targets, rom_fetcher, error));
+					if(error != Machine::Error::None) break;
+
+					machine = std::move(new_machine);
+					static_cast<Outputs::Display::ScanTarget *>(&scan_target)->will_change_owner();
+					setup_machine_input_output();
+					window_titler.set_file_name(final_path_component(event.drop.file));
 				} break;
 
 				case SDL_TEXTINPUT:

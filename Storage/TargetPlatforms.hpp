@@ -29,19 +29,20 @@ enum Type: IntType {
 	Coleco			=	1 << 10,
 	Commodore		=	1 << 11,
 	DiskII			=	1 << 12,
-	Sega			=	1 << 13,
-	Macintosh		=	1 << 14,
-	MSX				=	1 << 15,
-	Oric			=	1 << 16,
-	ZX80			=	1 << 17,
-	ZX81			=	1 << 18,
-	ZXSpectrum		=	1 << 19,
+	Enterprise		=	1 << 13,
+	Sega			=	1 << 14,
+	Macintosh		=	1 << 15,
+	MSX				=	1 << 16,
+	Oric			=	1 << 17,
+	ZX80			=	1 << 18,
+	ZX81			=	1 << 19,
+	ZXSpectrum		=	1 << 20,
 
 	Acorn			=	AcornAtom | AcornElectron | BBCMaster | BBCModelA | BBCModelB,
 	ZX8081			=	ZX80 | ZX81,
 	AllCartridge	=	Atari2600 | AcornElectron | Coleco | MSX,
-	AllDisk			=	Acorn | AmstradCPC | Commodore | Oric | MSX,	// TODO: | AtariST
-	AllTape			=	Acorn | AmstradCPC | Commodore | Oric | ZX80 | ZX81 | MSX | ZXSpectrum,
+	AllDisk			=	Acorn | AmstradCPC | Commodore | Oric | MSX | ZXSpectrum | Macintosh | AtariST | DiskII,
+	AllTape			=	Acorn | AmstradCPC | Commodore | Oric | ZX8081 | MSX | ZXSpectrum,
 };
 
 class TypeDistinguisher {

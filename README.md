@@ -1,8 +1,8 @@
 ![Clock Signal Application Icon](READMEImages/Icon.png)
 # Clock Signal
-Clock Signal ('CLK') is an emulator for tourists that seeks to be invisible. Users directly launch classic software with no emulator or per-emulated-machine learning curve.
+Clock Signal ('CLK') is an emulator for tourists that seeks to be invisible. Users directly launch classic software, avoiding the learning curves associated with emulators and with classic machines.
 
-macOS and source releases are [hosted on GitHub](https://github.com/TomHarte/CLK/releases). For desktop Linux it is also available as a [Snap](https://snapcraft.io/clock-signal). On the Mac it is a native Cocoa and Metal application; under Linux, BSD and other UNIXes and UNIX-alikes it uses OpenGL and can be built either with Qt or with SDL.
+macOS and source releases are [hosted on GitHub](https://github.com/TomHarte/CLK/releases). For desktop Linux it is also available as a [Snap](https://snapcraft.io/clock-signal). 
 
 This emulator seeks to offer:
 * single-click load of any piece of source media for any supported platform;
@@ -17,12 +17,15 @@ It currently contains emulations of the:
 * Atari ST;
 * ColecoVision;
 * Commodore Vic-20 (and Commodore 1540/1);
+* Enterprise 64/128;
 * Macintosh 512ke and Plus;
 * MSX 1;
 * Oric 1/Atmos;
 * Sega Master System;
 * Sinclair ZX80/81; and
 * Sinclair ZX Spectrum.
+
+On the Mac it is a native Cocoa and Metal application; under Linux, BSD and other UNIXes and UNIX-alikes it uses OpenGL and can be built either with Qt or with SDL.
 
 ## Single-step Loading
 
@@ -83,6 +86,7 @@ This emulator attempts cycle-accurate emulation of all supported machines. In so
 |![SG1000 Chack'n'Pop](READMEImages/SGChackNPop.png) | ![Atari 2600 Solaris](READMEImages/Atari2600Solaris.png)
 |![Vic-20 Gridrunner](READMEImages/Vic20Gridrunner.png) | ![VIC-20 BASIC](READMEImages/Vic20BASIC.png)
 |![ZX Spectrum Menu](READMEImages/ZXSpectrumMenu.png) | ![ZX Spectrum Chromatrons Attack](READMEImages/ZXSpectrumChromatronsAttack.png)
+|![Enterprise HERO](READMEImages/EnterpriseHERO.png) | ![Enterprise Startup](READMEImages/EnterpriseStartup.png)
 
 ![macOS Version](READMEImages/MultipleSystems.png)
 ![Qt Version](READMEImages/MultipleSystems-Ubuntu.png)
@@ -91,4 +95,4 @@ This emulator attempts cycle-accurate emulation of all supported machines. In so
 
 I've been asked several times whether it is possible to sponsor this project; I think that's a poor fit for this emulator's highly-malleable scope, and it makes me uncomfortable because as the author I primarily see only its defects.
 
-An Amazon US wishlist is now attached in the hope of avoiding the question in future. A lot of it is old books now available only secondhand — I like to read about potential future additions well in advance of starting on them. Per the optimism of some book sellers, please don't purchase anything that is currnetly listed only at an absurd price; they were sorted by secondhand price when added to the list, with cheapest being $5.
+An Amazon US wishlist is now attached in the hope of avoiding the question in future. A lot of it is old books now available only secondhand — I like to read about potential future additions well in advance of starting on them. Despite the optimism of some book sellers, please don't purchase anything that is currently listed only at an absurd price; they were sorted by secondhand price when added to the list, with the cheapest being $5.

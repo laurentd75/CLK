@@ -12,9 +12,16 @@ CONFIG += object_parallel_to_source
 INCLUDEPATH += $$[QT_INSTALL_PREFIX]/src/3rdparty/zlib
 LIBS += -lz
 
-# Add flags (i) to identify that this is a Qt build; and 
+# If targetting X11, link against that.
+linux {
+	QT += x11extras
+	LIBS += -lX11
+}
+
+# Add flags (i) to identify that this is a Qt build; and
 # (ii) to disable asserts in release builds.
 DEFINES += TARGET_QT
+DEFINES += IGNORE_APPLE
 QMAKE_CXXFLAGS_RELEASE += -DNDEBUG
 
 # Generate warnings for any use of APIs deprecated prior to Qt 6.0.0.
@@ -40,6 +47,7 @@ SOURCES += \
 	$$SRC/Analyser/Static/Commodore/*.cpp \
 	$$SRC/Analyser/Static/Disassembler/*.cpp \
 	$$SRC/Analyser/Static/DiskII/*.cpp \
+	$$SRC/Analyser/Static/Enterprise/*.cpp \
 	$$SRC/Analyser/Static/Macintosh/*.cpp \
 	$$SRC/Analyser/Static/MSX/*.cpp \
 	$$SRC/Analyser/Static/Oric/*.cpp \
@@ -85,6 +93,7 @@ SOURCES += \
 	$$SRC/Machines/Commodore/1540/Implementation/*.cpp \
 	$$SRC/Machines/Commodore/Vic-20/*.cpp \
 	$$SRC/Machines/Electron/*.cpp \
+	$$SRC/Machines/Enterprise/*.cpp \
 	$$SRC/Machines/MasterSystem/*.cpp \
 	$$SRC/Machines/MSX/*.cpp \
 	$$SRC/Machines/Oric/*.cpp \
@@ -129,14 +138,16 @@ SOURCES += \
 	$$SRC/Storage/MassStorage/Encodings/*.cpp \
 	$$SRC/Storage/MassStorage/Formats/*.cpp \
 	$$SRC/Storage/MassStorage/SCSI/*.cpp \
+	$$SRC/Storage/State/*.cpp \
 	$$SRC/Storage/Tape/*.cpp \
 	$$SRC/Storage/Tape/Formats/*.cpp \
 	$$SRC/Storage/Tape/Parsers/*.cpp \
 \
-    main.cpp \
-    mainwindow.cpp \
-    scantargetwidget.cpp \
-    timer.cpp
+	main.cpp \
+	mainwindow.cpp \
+	scantargetwidget.cpp \
+	timer.cpp \
+	keyboard.cpp
 
 HEADERS += \
 	$$SRC/Activity/*.hpp \
@@ -157,6 +168,7 @@ HEADERS += \
 	$$SRC/Analyser/Static/Commodore/*.hpp \
 	$$SRC/Analyser/Static/Disassembler/*.hpp \
 	$$SRC/Analyser/Static/DiskII/*.hpp \
+	$$SRC/Analyser/Static/Enterprise/*.hpp \
 	$$SRC/Analyser/Static/Macintosh/*.hpp \
 	$$SRC/Analyser/Static/MSX/*.hpp \
 	$$SRC/Analyser/Static/Oric/*.hpp \
@@ -212,6 +224,7 @@ HEADERS += \
 	$$SRC/Machines/Commodore/1540/Implementation/*.hpp \
 	$$SRC/Machines/Commodore/Vic-20/*.hpp \
 	$$SRC/Machines/Electron/*.hpp \
+	$$SRC/Machines/Enterprise/*.hpp \
 	$$SRC/Machines/MasterSystem/*.hpp \
 	$$SRC/Machines/MSX/*.hpp \
 	$$SRC/Machines/Oric/*.hpp \
@@ -269,16 +282,18 @@ HEADERS += \
 	$$SRC/Storage/MassStorage/Encodings/*.hpp \
 	$$SRC/Storage/MassStorage/Formats/*.hpp \
 	$$SRC/Storage/MassStorage/SCSI/*.hpp \
+	$$SRC/Storage/State/*.hpp \
 	$$SRC/Storage/Tape/*.hpp \
 	$$SRC/Storage/Tape/Formats/*.hpp \
 	$$SRC/Storage/Tape/Parsers/*.hpp \
 \
-    audiobuffer.h \
-    functionthread.h \
-    mainwindow.h \
-    scantargetwidget.h \
-    settings.h \
-    timer.h
+	audiobuffer.h \
+	functionthread.h \
+	mainwindow.h \
+	scantargetwidget.h \
+	settings.h \
+	keyboard.h \
+	timer.h
 
 FORMS += \
 	mainwindow.ui

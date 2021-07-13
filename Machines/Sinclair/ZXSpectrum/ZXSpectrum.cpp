@@ -8,9 +8,9 @@
 
 #include "ZXSpectrum.hpp"
 
+#include "State.hpp"
 #include "Video.hpp"
-
-#define LOG_PREFIX "[Spectrum] "
+#include "../Keyboard/Keyboard.hpp"
 
 #include "../../../Activity/Source.hpp"
 #include "../../MachineTypes.hpp"
@@ -24,7 +24,9 @@
 // just grab the CPC's version of an FDC.
 #include "../../AmstradCPC/FDC.hpp"
 
+#define LOG_PREFIX "[Spectrum] "
 #include "../../../Outputs/Log.hpp"
+
 #include "../../../Outputs/Speaker/Implementation/CompoundSource.hpp"
 #include "../../../Outputs/Speaker/Implementation/LowpassSpeaker.hpp"
 #include "../../../Outputs/Speaker/Implementation/SampleSource.hpp"
@@ -39,11 +41,75 @@
 
 #include "../../../ClockReceiver/JustInTime.hpp"
 
-#include "../../../Processors/Z80/State/State.hpp"
-
-#include "../Keyboard/Keyboard.hpp"
-
 #include <array>
+
+namespace {
+
+/*!
+	Provides a simultaneous Kempston and Interface 2-style joystick.
+*/
+class Joystick: public Inputs::ConcreteJoystick {
+	public:
+		Joystick() :
+			ConcreteJoystick({
+				Input(Input::Up),
+				Input(Input::Down),
+				Input(Input::Left),
+				Input(Input::Right),
+				Input(Input::Fire)
+			}) {}
+
+		void did_set_input(const Input &digital_input, bool is_active) final {
+#define APPLY_KEMPSTON(b)	if(is_active) kempston_ |= b; else kempston_ &= ~b;
+#define APPLY_SINCLAIR(b)	if(is_active) sinclair_ &= ~b; else sinclair_ |= b;
+
+			switch(digital_input.type) {
+				default: return;
+
+				case Input::Right:
+					APPLY_KEMPSTON(0x01);
+					APPLY_SINCLAIR(0x0208);
+				break;
+				case Input::Left:
+					APPLY_KEMPSTON(0x02);
+					APPLY_SINCLAIR(0x0110);
+				break;
+				case Input::Down:
+					APPLY_KEMPSTON(0x04);
+					APPLY_SINCLAIR(0x0404);
+				break;
+				case Input::Up:
+					APPLY_KEMPSTON(0x08);
+					APPLY_SINCLAIR(0x0802);
+				break;
+				case Input::Fire:
+					APPLY_KEMPSTON(0x10);
+					APPLY_SINCLAIR(0x1001);
+				break;
+			}
+
+#undef APPLY_KEMPSTON
+#undef APPLY_SINCLAIR
+		}
+
+		/// @returns The value that a Kempston joystick interface would report if this joystick
+		/// were plugged into it.
+		uint8_t get_kempston() {
+			return kempston_;
+		}
+
+		/// @returns The value that a Sinclair interface would report if this joystick
+		/// were plugged into it via @c port (which should be either 0 or 1, for ports 1 or 2).
+		uint8_t get_sinclair(int port) {
+			return uint8_t(sinclair_ >> (port * 8));
+		}
+
+	private:
+		uint8_t kempston_ = 0x00;
+		uint16_t sinclair_ = 0xffff;
+};
+
+}
 
 namespace Sinclair {
 namespace ZXSpectrum {
@@ -58,6 +124,7 @@ template<Model model> class ConcreteMachine:
 	public CPU::Z80::BusHandler,
 	public Machine,
 	public MachineTypes::AudioProducer,
+	public MachineTypes::JoystickMachine,
 	public MachineTypes::MappedKeyboardMachine,
 	public MachineTypes::MediaTarget,
 	public MachineTypes::ScanProducer,
@@ -79,36 +146,31 @@ template<Model model> class ConcreteMachine:
 			set_clock_rate(clock_rate());
 			speaker_.set_input_rate(float(clock_rate()) / 2.0f);
 
-			// With only the +2a and +3 currently supported, the +3 ROM is always
-			// the one required.
-			std::vector<ROMMachine::ROM> rom_names;
-			const std::string machine = "ZXSpectrum";
+			ROM::Name rom_name;
 			switch(model) {
 				case Model::SixteenK:
-				case Model::FortyEightK:
-					rom_names.emplace_back(machine, "the 48kb ROM", "48.rom", 16 * 1024, 0xddee531f);
-				break;
-
-				case Model::OneTwoEightK:
-					rom_names.emplace_back(machine, "the 128kb ROM", "128.rom", 32 * 1024, 0x2cbe8995);
-				break;
-
-				case Model::Plus2:
-					rom_names.emplace_back(machine, "the +2 ROM", "plus2.rom", 32 * 1024, 0xe7a517dc);
-				break;
-
+				case Model::FortyEightK:	rom_name = ROM::Name::Spectrum48k;		break;
+				case Model::OneTwoEightK:	rom_name = ROM::Name::Spectrum128k;		break;
+				case Model::Plus2:			rom_name = ROM::Name::SpecrumPlus2;		break;
 				case Model::Plus2a:
-				case Model::Plus3: {
-					const std::initializer_list<uint32_t> crc32s = { 0x96e3c17a, 0xbe0d9ec4 };
-					rom_names.emplace_back(machine, "the +2a/+3 ROM", "plus3.rom", 64 * 1024, crc32s);
-				} break;
+				case Model::Plus3: 			rom_name = ROM::Name::SpectrumPlus3;	break;
+				// TODO: possibly accept the +3 ROM in multiple parts?
 			}
-			const auto roms = rom_fetcher(rom_names);
-			if(!roms[0]) throw ROMMachine::Error::MissingROMs;
-			memcpy(rom_.data(), roms[0]->data(), std::min(rom_.size(), roms[0]->size()));
+			const auto request = ROM::Request(rom_name);
+			auto roms = rom_fetcher(request);
+			if(!request.validate(roms)) {
+				throw ROMMachine::Error::MissingROMs;
+			}
+
+			const auto &rom = roms.find(rom_name)->second;
+			memcpy(rom_.data(), rom.data(), std::min(rom_.size(), rom.size()));
 
 			// Register for sleeping notifications.
 			tape_player_.set_clocking_hint_observer(this);
+
+			// Attach a couple of joysticks.
+			joysticks_.emplace_back(new Joystick);
+			joysticks_.emplace_back(new Joystick);
 
 			// Set up initial memory map.
 			update_memory_map();
@@ -123,6 +185,29 @@ template<Model model> class ConcreteMachine:
 				// Hold it for five seconds, more or less.
 				duration_to_press_enter_ = Cycles(5 * clock_rate());
 				keyboard_.set_key_state(ZX::Keyboard::KeyEnter, true);
+			}
+
+			// Install state if supplied.
+			if(target.state) {
+				const auto state = static_cast<State *>(target.state.get());
+				state->z80.apply(z80_);
+				state->video.apply(*video_.last_valid());
+				state->ay.apply(ay_);
+
+				// If this is a 48k or 16k machine, remap source data from its original
+				// linear form to whatever the banks end up being; otherwise copy as is.
+				if(model <= Model::FortyEightK) {
+					const size_t num_banks = std::min(size_t(48*1024), state->ram.size()) >> 14;
+					for(size_t c = 0; c < num_banks; c++) {
+						memcpy(&write_pointers_[c + 1][(c+1) * 0x4000], &state->ram[c * 0x4000], 0x4000);
+					}
+				} else {
+					memcpy(ram_.data(), state->ram.data(), std::min(ram_.size(), state->ram.size()));
+
+					port1ffd_ = state->last_1ffd;
+					port7ffd_ = state->last_7ffd;
+					update_memory_map();
+				}
 			}
 		}
 
@@ -200,6 +285,10 @@ template<Model model> class ConcreteMachine:
 
 		void set_display_type(Outputs::Display::DisplayType display_type) override {
 			video_->set_display_type(display_type);
+		}
+
+		Outputs::Display::DisplayType get_display_type() const override {
+			return video_->get_display_type();
 		}
 
 		// MARK: - BusHandler.
@@ -322,6 +411,7 @@ template<Model model> class ConcreteMachine:
 							break;
 						}
 					}
+					[[fallthrough]];
 
 				case PartialMachineCycle::Read:
 					if constexpr (model == Model::SixteenK) {
@@ -384,10 +474,6 @@ template<Model model> class ConcreteMachine:
 
 						// Set the proper video base pointer.
 						set_video_address();
-
-						// Potentially lock paging, _after_ the current
-						// port values have taken effect.
-						disable_paging_ |= *cycle.value & 0x20;
 					}
 
 					// Test for +2a/+3 paging (i.e. port 1ffd).
@@ -435,6 +521,11 @@ template<Model model> class ConcreteMachine:
 					bool did_match = false;
 					*cycle.value = 0xff;
 
+					if(!(address&32)) {
+						did_match = true;
+						*cycle.value &= static_cast<Joystick *>(joysticks_[0].get())->get_kempston();
+					}
+
 					if(!(address&1)) {
 						did_match = true;
 
@@ -447,11 +538,15 @@ template<Model model> class ConcreteMachine:
 						*cycle.value &= keyboard_.read(address);
 						*cycle.value &= tape_player_.get_input() ? 0xbf : 0xff;
 
-						// If this read is within 200 cycles of the previous,
-						// count it as an adjacent hit; if 20 of those have
-						// occurred then start the tape motor.
+						// Add Joystick input on top.
+						if(!(address&0x1000)) *cycle.value &= static_cast<Joystick *>(joysticks_[0].get())->get_sinclair(0);
+						if(!(address&0x0800)) *cycle.value &= static_cast<Joystick *>(joysticks_[1].get())->get_sinclair(1);
+
+						// If this read is between 50 and 200 cycles since the
+						// previous, count it as an adjacent hit; if 20 of those
+						// have occurred then start the tape motor.
 						if(use_automatic_tape_motor_control_) {
-							if(cycles_since_tape_input_read_ < HalfCycles(400)) {
+							if(cycles_since_tape_input_read_ >= HalfCycles(100) && cycles_since_tape_input_read_ < HalfCycles(200)) {
 								++recent_tape_hits_;
 
 								if(recent_tape_hits_ == 20) {
@@ -523,11 +618,11 @@ template<Model model> class ConcreteMachine:
 			if(!tape_player_is_sleeping_) tape_player_.run_for(duration.as_integral());
 
 			// Update automatic tape motor control, if enabled; if it's been
-			// 3 seconds since software last possibly polled the tape, stop it.
-			if(use_automatic_tape_motor_control_ && cycles_since_tape_input_read_ < HalfCycles(clock_rate() * 6)) {
+			// 0.5 seconds since software last possibly polled the tape, stop it.
+			if(use_automatic_tape_motor_control_ && cycles_since_tape_input_read_ < HalfCycles(clock_rate())) {
 				cycles_since_tape_input_read_ += duration;
 
-				if(cycles_since_tape_input_read_ >= HalfCycles(clock_rate() * 6)) {
+				if(cycles_since_tape_input_read_ >= HalfCycles(clock_rate())) {
 					tape_player_.set_motor_control(false);
 					recent_tape_hits_ = 0;
 				}
@@ -625,6 +720,7 @@ template<Model model> class ConcreteMachine:
 			auto options = std::make_unique<Options>(Configurable::OptionsType::UserFriendly);	// OptionsType is arbitrary, but not optional.
 			options->automatic_tape_motor_control = use_automatic_tape_motor_control_;
 			options->quickload = allow_fast_tape_hack_;
+			options->output = get_video_signal_configurable();
 			return options;
 		}
 
@@ -713,6 +809,10 @@ template<Model model> class ConcreteMachine:
 				set_memory(2, 2);
 				set_memory(3, port7ffd_ & 7);
 			}
+
+			// Potentially lock paging, _after_ the current
+			// port values have taken effect.
+			disable_paging_ = port7ffd_ & 0x20;
 		}
 
 		void set_memory(int bank, uint8_t source) {
@@ -758,10 +858,10 @@ template<Model model> class ConcreteMachine:
 		// MARK: - Video.
 		using VideoType =
 			std::conditional_t<
-				model <= Model::FortyEightK, Video<VideoTiming::FortyEightK>,
+				model <= Model::FortyEightK, Video::Video<Video::Timing::FortyEightK>,
 				std::conditional_t<
-					model <= Model::Plus2, Video<VideoTiming::OneTwoEightK>,
-					Video<VideoTiming::Plus3>
+					model <= Model::Plus2, Video::Video<Video::Timing::OneTwoEightK>,
+					Video::Video<Video::Timing::Plus3>
 				>
 			>;
 		JustInTimeActor<VideoType> video_;
@@ -872,6 +972,12 @@ template<Model model> class ConcreteMachine:
 
 		// MARK: - Automatic startup.
 		Cycles duration_to_press_enter_;
+
+		// MARK: - Joysticks
+		std::vector<std::unique_ptr<Inputs::Joystick>> joysticks_;
+		const std::vector<std::unique_ptr<Inputs::Joystick>> &get_joysticks() override {
+			return joysticks_;
+		}
 };
 
 

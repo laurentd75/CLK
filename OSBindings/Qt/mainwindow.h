@@ -12,6 +12,7 @@
 #include "timer.h"
 #include "ui_mainwindow.h"
 #include "functionthread.h"
+#include "keyboard.h"
 
 #include "../../Analyser/Static/StaticAnalyser.hpp"
 #include "../../Machines/Utility/MachineForTarget.hpp"
@@ -19,8 +20,9 @@
 #include "../../Activity/Observer.hpp"
 
 // There are machine-specific controls for the following:
-#include "../../Machines/Sinclair/ZX8081/ZX8081.hpp"
+#include "../../Machines/Apple/AppleII/AppleII.hpp"
 #include "../../Machines/Atari/2600/Atari2600.hpp"
+#include "../../Machines/Sinclair/ZX8081/ZX8081.hpp"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -59,7 +61,7 @@ class MainWindow : public QMainWindow, public Outputs::Speaker::Speaker::Delegat
 		void launchMachine();
 
 		QString romRequestBaseText;
-		std::vector<ROMMachine::ROM> missingRoms;
+		ROM::Request missingRoms;
 
 		// File drag and drop is supported.
 		void dragEnterEvent(QDragEnterEvent* event) override;
@@ -89,6 +91,7 @@ class MainWindow : public QMainWindow, public Outputs::Speaker::Speaker::Delegat
 		void start_amstradCPC();
 		void start_atariST();
 		void start_electron();
+		void start_enterprise();
 		void start_macintosh();
 		void start_msx();
 		void start_oric();
@@ -102,7 +105,7 @@ class MainWindow : public QMainWindow, public Outputs::Speaker::Speaker::Delegat
 		} keyboardInputMode;
 
 		QAction *insertAction = nullptr;
-		void insertFile(const QString &fileName);
+		bool insertFile(const QString &fileName);
 
 		bool launchFile(const QString &fileName);
 		void launchTarget(std::unique_ptr<Analyser::Static::Target> &&);
@@ -136,6 +139,9 @@ class MainWindow : public QMainWindow, public Outputs::Speaker::Speaker::Delegat
 		void addAtari2600Menu();
 		void toggleAtari2600Switch(Atari2600Switch toggleSwitch);
 
+		void addAppleIIMenu();
+		void setAppleIISquarePixels(bool);
+
 		void setWindowTitle();
 		bool mouseIsCaptured = false;
 
@@ -144,7 +150,7 @@ class MainWindow : public QMainWindow, public Outputs::Speaker::Speaker::Delegat
 
 		QMenu *inputMenu = nullptr;
 
-		std::optional<Inputs::Keyboard::Key> keyForEvent(QKeyEvent *);
+		KeyboardMapper keyMapper;
 
 		void register_led(const std::string &) override;
 		void set_led_status(const std::string &, bool) override;

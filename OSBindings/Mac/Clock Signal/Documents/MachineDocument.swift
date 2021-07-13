@@ -63,7 +63,7 @@ class MachineDocument:
 	}
 
 	/// The volume view.
-	@IBOutlet var volumeView: NSBox!
+	@IBOutlet var volumeView: NSView!
 	@IBOutlet var volumeSlider: NSSlider!
 
 	// MARK: - NSDocument Overrides and NSWindowDelegate methods.
@@ -87,6 +87,14 @@ class MachineDocument:
 		}
 	}
 
+	private func dismissPanels() {
+		activityPanel?.setIsVisible(false)
+		activityPanel = nil
+
+		optionsPanel?.setIsVisible(false)
+		optionsPanel = nil
+	}
+
 	override func close() {
 		// Close any dangling sheets.
 		//
@@ -105,11 +113,7 @@ class MachineDocument:
 		machine?.stop()
 
 		// Dismiss panels.
-		activityPanel?.setIsVisible(false)
-		activityPanel = nil
-
-		optionsPanel?.setIsVisible(false)
-		optionsPanel = nil
+		dismissPanels()
 
 		// End the update cycle.
 		actionLock.lock()
@@ -131,25 +135,32 @@ class MachineDocument:
 		super.windowControllerDidLoadNib(aController)
 		aController.window?.contentAspectRatio = self.aspectRatio()
 		volumeSlider.floatValue = userDefaultsVolume()
+
+		volumeView.wantsLayer = true
+		volumeView.layer?.cornerRadius = 5.0
 	}
 
-	private var missingROMs: [CSMissingROM] = []
+	private var missingROMs: String = ""
 	func configureAs(_ analysis: CSStaticAnalyser) {
 		self.machineDescription = analysis
 
-		let missingROMs = NSMutableArray()
+		actionLock.lock()
+		drawLock.lock()
+
+		let missingROMs = NSMutableString()
 		if let machine = CSMachine(analyser: analysis, missingROMs: missingROMs) {
+			setRomRequesterIsVisible(false)
+
 			self.machine = machine
-			setupActivityDisplay()
 			machine.setVolume(userDefaultsVolume())
 			setupMachineOutput()
 		} else {
-			// Store the selected machine and list of missing ROMs, and
-			// show the missing ROMs dialogue.
-			self.missingROMs = missingROMs.map({$0 as! CSMissingROM})
-
+			self.missingROMs = missingROMs as String
 			requestRoms()
 		}
+
+		actionLock.unlock()
+		drawLock.unlock()
 	}
 
 	enum InteractionMode {
@@ -200,6 +211,9 @@ class MachineDocument:
 			let aspectRatio = self.aspectRatio()
 			machine.setView(scanTargetView, aspectRatio: Float(aspectRatio.width / aspectRatio.height))
 
+			// Get rid of all existing accessory panels.
+			dismissPanels()
+
 			// Attach an options panel if one is available.
 			if let optionsPanelNibName = self.machineDescription?.optionsPanelNibName {
 				Bundle.main.loadNibNamed(optionsPanelNibName, owner: self, topLevelObjects: nil)
@@ -208,11 +222,10 @@ class MachineDocument:
 				showOptions(self)
 			}
 
-			machine.delegate = self
+			// Create and populate an activity display if required.
+			setupActivityDisplay()
 
-			// Callbacks from the OpenGL may come on a different thread, immediately following the .delegate set;
-			// hence the full setup of the best-effort updater prior to setting self as a delegate.
-//			scanTargetView.delegate = self
+			machine.delegate = self
 			scanTargetView.responderDelegate = self
 
 			// If this machine has a mouse, enable mouse capture; also indicate whether usurption
@@ -252,7 +265,7 @@ class MachineDocument:
 		let isStereo = self.machine.isStereo
 		if selectedSamplingRate > 0 {
 			// [Re]create the audio queue only if necessary.
-			if self.audioQueue == nil || self.audioQueue.samplingRate != selectedSamplingRate {
+			if self.audioQueue == nil || self.audioQueue.samplingRate != selectedSamplingRate || self.audioQueue != self.machine.audioQueue {
 				self.machine.audioQueue = nil
 				self.audioQueue = CSAudioQueue(samplingRate: Float64(selectedSamplingRate), isStereo:isStereo)
 				self.audioQueue.delegate = self
@@ -280,8 +293,7 @@ class MachineDocument:
 
 	/// Delegate message to receive drag and drop files.
 	final func scanTargetView(_ view: CSScanTargetView, didReceiveFileAt URL: URL) {
-		let mediaSet = CSMediaSet(fileAt: URL)
-		mediaSet.apply(to: self.machine)
+		insertFile(URL)
 	}
 
 	/// Action for the insert menu command; displays an NSOpenPanel and then segues into the same process
@@ -292,10 +304,27 @@ class MachineDocument:
 		openPanel.beginSheetModal(for: self.windowControllers[0].window!) { (response) in
 			if response == .OK {
 				for url in openPanel.urls {
-					let mediaSet = CSMediaSet(fileAt: url)
-					mediaSet.apply(to: self.machine)
+					self.insertFile(url)
 				}
 			}
+		}
+	}
+
+	private func insertFile(_ URL: URL) {
+		// Try to insert media.
+		let mediaSet = CSMediaSet(fileAt: URL)
+		if !mediaSet.empty {
+			mediaSet.apply(to: self.machine)
+			return
+		}
+
+		// Failing that see whether a new machine is required.
+		// TODO.
+		if let newMachine = CSStaticAnalyser(fileAt: URL) {
+			machine?.stop()
+			self.interactionMode = .notStarted
+			self.scanTargetView.willChangeScanTargetOwner()
+			configureAs(newMachine)
 		}
 	}
 
@@ -387,23 +416,42 @@ class MachineDocument:
 	@IBOutlet var romReceiverErrorField: NSTextField?
 	@IBOutlet var romReceiverView: CSROMReceiverView?
 	private var romRequestBaseText = ""
+
+	private func setRomRequesterIsVisible(_ visible : Bool) {
+		if !visible && self.romRequesterPanel == nil {
+			return;
+		}
+
+		if self.romRequesterPanel!.isVisible == visible {
+			return
+		}
+
+		if visible {
+			self.windowControllers[0].window?.beginSheet(self.romRequesterPanel!, completionHandler: nil)
+		} else {
+			self.windowControllers[0].window?.endSheet(self.romRequesterPanel!)
+		}
+	}
+
 	func requestRoms() {
 		// Don't act yet if there's no window controller yet.
 		if self.windowControllers.count == 0 {
 			return
 		}
 
-		// Load the ROM requester dialogue.
-		Bundle.main.loadNibNamed("ROMRequester", owner: self, topLevelObjects: nil)
-		self.romReceiverView!.delegate = self
-		self.romRequestBaseText = romRequesterText!.stringValue
-		romReceiverErrorField?.alphaValue = 0.0
+		// Load the ROM requester dialogue if it's not already loaded.
+		if self.romRequesterPanel == nil {
+			Bundle.main.loadNibNamed("ROMRequester", owner: self, topLevelObjects: nil)
+			self.romReceiverView!.delegate = self
+			self.romRequestBaseText = romRequesterText!.stringValue
+			romReceiverErrorField?.alphaValue = 0.0
+		}
 
 		// Populate the current absentee list.
 		populateMissingRomList()
 
 		// Show the thing.
-		self.windowControllers[0].window?.beginSheet(self.romRequesterPanel!, completionHandler: nil)
+		setRomRequesterIsVisible(true)
 	}
 
 	@IBAction func cancelRequestROMs(_ sender: NSButton?) {
@@ -411,89 +459,17 @@ class MachineDocument:
 	}
 
 	func populateMissingRomList() {
-		// Fill in the missing details; first build a list of all the individual
-		// line items.
-		var requestLines: [String] = []
-		for missingROM in self.missingROMs {
-			if let descriptiveName = missingROM.descriptiveName {
-				requestLines.append("• " + descriptiveName)
-			} else {
-				requestLines.append("• " + missingROM.fileName)
-			}
-		}
-
-		// Suffix everything up to the penultimate line with a semicolon;
-		// the penultimate line with a semicolon and a conjunctive; the final
-		// line with a full stop.
-		for x in 0 ..< requestLines.count {
-			if x < requestLines.count - 2 {
-				requestLines[x].append(";")
-			} else if x < requestLines.count - 1 {
-				requestLines[x].append("; and")
-			} else {
-				requestLines[x].append(".")
-			}
-		}
-		romRequesterText!.stringValue = self.romRequestBaseText + requestLines.joined(separator: "\n")
+		romRequesterText!.stringValue = self.romRequestBaseText + self.missingROMs
 	}
 
 	func romReceiverView(_ view: CSROMReceiverView, didReceiveFileAt URL: URL) {
 		// Test whether the file identified matches any of the currently missing ROMs.
 		// If so then remove that ROM from the missing list and update the request screen.
 		// If no ROMs are still missing, start the machine.
-		do {
-			let fileData = try Data(contentsOf: URL)
-			var didInstallRom = false
-
-			// Try to match by size first, CRC second. Accept that some ROMs may have
-			// some additional appended data. Arbitrarily allow them to be up to 10kb
-			// too large.
-			var index = 0
-			for missingROM in self.missingROMs {
-				if fileData.count >= missingROM.size && fileData.count < missingROM.size + 10*1024 {
-					// Trim to size.
-					let trimmedData = fileData[0 ..< missingROM.size]
-
-					// Get CRC.
-					if missingROM.crc32s.contains( (trimmedData as NSData).crc32 ) {
-						// This ROM matches; copy it into the application library,
-						// strike it from the missing ROM list and decide how to
-						// proceed.
-						let fileManager = FileManager.default
-						let targetPath = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-							.appendingPathComponent("ROMImages")
-							.appendingPathComponent(missingROM.machineName)
-						let targetFile = targetPath
-							.appendingPathComponent(missingROM.fileName)
-
-						do {
-							try fileManager.createDirectory(atPath: targetPath.path, withIntermediateDirectories: true, attributes: nil)
-							try trimmedData.write(to: targetFile)
-						} catch let error {
-							showRomReceiverError(error: "Couldn't write to application support directory: \(error)")
-						}
-
-						self.missingROMs.remove(at: index)
-						didInstallRom = true
-						break
-					}
-				}
-
-				index = index + 1
-			}
-
-			if didInstallRom {
-				if self.missingROMs.count == 0 {
-					self.windowControllers[0].window?.endSheet(self.romRequesterPanel!)
-					configureAs(self.machineDescription!)
-				} else {
-					populateMissingRomList()
-				}
-			} else {
-				showRomReceiverError(error: "Didn't recognise contents of \(URL.lastPathComponent)")
-			}
-		} catch let error {
-			showRomReceiverError(error: "Couldn't read file at \(URL.absoluteString): \(error)")
+		if CSMachine.attemptInstallROM(URL) {
+			configureAs(self.machineDescription!)
+		} else {
+			showRomReceiverError(error: "Didn't recognise contents of \(URL.lastPathComponent)")
 		}
 	}
 

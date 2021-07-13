@@ -7,6 +7,7 @@
 //
 
 #include "FIRFilter.hpp"
+
 #include <cmath>
 
 #ifndef M_PI

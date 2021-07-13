@@ -27,14 +27,21 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 	@IBOutlet var appleIIgsModelButton: NSPopUpButton!
 	@IBOutlet var appleIIgsMemorySizeButton: NSPopUpButton!
 
+	// MARK: - CPC properties
+	@IBOutlet var cpcModelTypeButton: NSPopUpButton!
+
 	// MARK: - Electron properties
 	@IBOutlet var electronDFSButton: NSButton!
 	@IBOutlet var electronADFSButton: NSButton!
 	@IBOutlet var electronAP6Button: NSButton!
 	@IBOutlet var electronSidewaysRAMButton: NSButton!
 
-	// MARK: - CPC properties
-	@IBOutlet var cpcModelTypeButton: NSPopUpButton!
+	// MARK: - Enterprise properties
+	@IBOutlet var enterpriseModelButton: NSPopUpButton!
+	@IBOutlet var enterpriseSpeedButton: NSPopUpButton!
+	@IBOutlet var enterpriseEXOSButton: NSPopUpButton!
+	@IBOutlet var enterpriseBASICButton: NSPopUpButton!
+	@IBOutlet var enterpriseDOSButton: NSPopUpButton!
 
 	// MARK: - Macintosh properties
 	@IBOutlet var macintoshModelTypeButton: NSPopUpButton!
@@ -93,14 +100,21 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 		appleIIgsModelButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.appleIIgsModel"))
 		appleIIgsMemorySizeButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.appleIIgsMemorySize"))
 
+		// CPC settings
+		cpcModelTypeButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.cpcModel"))
+
 		// Electron settings
 		electronDFSButton.state = standardUserDefaults.bool(forKey: "new.electronDFS") ? .on : .off
 		electronADFSButton.state = standardUserDefaults.bool(forKey: "new.electronADFS") ? .on : .off
 		electronAP6Button.state = standardUserDefaults.bool(forKey: "new.electronAP6") ? .on : .off
 		electronSidewaysRAMButton.state = standardUserDefaults.bool(forKey: "new.electronSidewaysRAM") ? .on : .off
 
-		// CPC settings
-		cpcModelTypeButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.cpcModel"))
+		// Enterprise settings
+		enterpriseModelButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.enterpriseModel"))
+		enterpriseSpeedButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.enterpriseSpeed"))
+		enterpriseEXOSButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.enterpriseEXOSVersion"))
+		enterpriseBASICButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.enterpriseBASICVersion"))
+		enterpriseDOSButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.enterpriseDOS"))
 
 		// Macintosh settings
 		macintoshModelTypeButton.selectItem(withTag: standardUserDefaults.integer(forKey: "new.macintoshModel"))
@@ -143,14 +157,21 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 		standardUserDefaults.set(appleIIgsModelButton.selectedTag(), forKey: "new.appleIIgsModel")
 		standardUserDefaults.set(appleIIgsMemorySizeButton.selectedTag(), forKey: "new.appleIIgsMemorySize")
 
+		// CPC settings
+		standardUserDefaults.set(cpcModelTypeButton.selectedTag(), forKey: "new.cpcModel")
+
 		// Electron settings
 		standardUserDefaults.set(electronDFSButton.state == .on, forKey: "new.electronDFS")
 		standardUserDefaults.set(electronADFSButton.state == .on, forKey: "new.electronADFS")
 		standardUserDefaults.set(electronAP6Button.state == .on, forKey: "new.electronAP6")
 		standardUserDefaults.set(electronSidewaysRAMButton.state == .on, forKey: "new.electronSidewaysRAM")
 
-		// CPC settings
-		standardUserDefaults.set(cpcModelTypeButton.selectedTag(), forKey: "new.cpcModel")
+		// Enterprise settings
+		standardUserDefaults.set(enterpriseModelButton.selectedTag(), forKey: "new.enterpriseModel")
+		standardUserDefaults.set(enterpriseSpeedButton.selectedTag(), forKey: "new.enterpriseSpeed")
+		standardUserDefaults.set(enterpriseEXOSButton.selectedTag(), forKey: "new.enterpriseEXOSVersion")
+		standardUserDefaults.set(enterpriseBASICButton.selectedTag(), forKey: "new.enterpriseBASICVersion")
+		standardUserDefaults.set(enterpriseDOSButton.selectedTag(), forKey: "new.enterpriseDOS")
 
 		// Macintosh settings
 		standardUserDefaults.set(macintoshModelTypeButton.selectedTag(), forKey: "new.macintoshModel")
@@ -205,12 +226,6 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 		storeOptions()
 
 		switch machineSelector.selectedTabViewItem!.identifier as! String {
-			case "electron":
-				return CSStaticAnalyser(
-					electronDFS: electronDFSButton.state == .on,
-					adfs: electronADFSButton.state == .on,
-					ap6: electronAP6Button.state == .on,
-					sidewaysRAM: electronSidewaysRAMButton.state == .on)
 
 			case "appleii":
 				var model: CSMachineAppleIIModel = .appleII
@@ -241,22 +256,71 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 					default:	model = .ROM00
 				}
 
-				let memorySize = Kilobytes(appleIIgsMemorySizeButton.selectedItem!.tag)
+				let memorySize = Kilobytes(appleIIgsMemorySizeButton.selectedTag())
 				return CSStaticAnalyser(appleIIgsModel: model, memorySize: memorySize)
 
 			case "atarist":
 				return CSStaticAnalyser(atariSTModel: .model512k)
 
 			case "cpc":
-				switch cpcModelTypeButton.selectedItem!.tag {
+				switch cpcModelTypeButton.selectedTag() {
 					case 464:	return CSStaticAnalyser(amstradCPCModel: .model464)
 					case 664:	return CSStaticAnalyser(amstradCPCModel: .model664)
 					case 6128:	fallthrough
 					default:	return CSStaticAnalyser(amstradCPCModel: .model6128)
 				}
 
+			case "electron":
+				return CSStaticAnalyser(
+					electronDFS: electronDFSButton.state == .on,
+					adfs: electronADFSButton.state == .on,
+					ap6: electronAP6Button.state == .on,
+					sidewaysRAM: electronSidewaysRAMButton.state == .on)
+
+			case "enterprise":
+				var model: CSMachineEnterpriseModel = .model128
+				switch enterpriseModelButton.selectedTag() {
+					case 64:	model = .model64
+					case 256:	model = .model256
+					case 128:	fallthrough
+					default:	model = .model128
+				}
+
+				var speed: CSMachineEnterpriseSpeed = .speed4MHz
+				switch enterpriseSpeedButton.selectedTag() {
+					case 6:		speed = .speed6MHz
+					case 4:		fallthrough
+					default:	speed = .speed4MHz
+				}
+
+				var exos: CSMachineEnterpriseEXOS = .version21
+				switch enterpriseEXOSButton.selectedTag() {
+					case 10:	exos = .version10
+					case 20:	exos = .version20
+					case 21:	fallthrough
+					default:	exos = .version21
+				}
+
+				var basic: CSMachineEnterpriseBASIC = .version21
+				switch enterpriseBASICButton.selectedTag() {
+					case 0:		basic = .none
+					case 10:	basic = .version10
+					case 11:	basic = .version11
+					case 21:	fallthrough
+					default:	basic = .version21
+				}
+
+				var dos: CSMachineEnterpriseDOS = .dosNone
+				switch enterpriseDOSButton.selectedTag() {
+					case 1:		dos = .DOSEXDOS
+					case 0:		fallthrough
+					default:	dos = .dosNone
+				}
+
+				return CSStaticAnalyser(enterpriseModel: model, speed: speed, exosVersion: exos, basicVersion: basic, dos: dos)
+
 			case "mac":
-				switch macintoshModelTypeButton.selectedItem!.tag {
+				switch macintoshModelTypeButton.selectedTag() {
 					case 0:		return CSStaticAnalyser(macintoshModel: .model128k)
 					case 1:		return CSStaticAnalyser(macintoshModel: .model512k)
 					case 2:		return CSStaticAnalyser(macintoshModel: .model512ke)
@@ -266,7 +330,7 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
 			case "msx":
 				let hasDiskDrive = msxHasDiskDriveButton.state == .on
-				switch msxRegionButton.selectedItem!.tag {
+				switch msxRegionButton.selectedTag() {
 					case 2:
 						return CSStaticAnalyser(msxRegion: .japanese, hasDiskDrive: hasDiskDrive)
 					case 1:
@@ -287,7 +351,7 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
 				}
 				var model: CSMachineOricModel = .oric1
-				switch oricModelTypeButton.selectedItem!.tag {
+				switch oricModelTypeButton.selectedTag() {
 					case 1:		model = .oricAtmos
 					case 2:		model = .pravetz
 					default:	break
@@ -297,7 +361,7 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
 			case "spectrum":
 				var model: CSMachineSpectrumModel = .plus2a
-				switch spectrumModelTypeButton.selectedItem!.tag {
+				switch spectrumModelTypeButton.selectedTag() {
 					case 16:	model = .sixteenK
 					case 48:	model = .fortyEightK
 					case 128:	model = .oneTwoEightK
@@ -310,9 +374,9 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 				return CSStaticAnalyser(spectrumModel: model)
 
 			case "vic20":
-				let memorySize = Kilobytes(vic20MemorySizeButton.selectedItem!.tag)
+				let memorySize = Kilobytes(vic20MemorySizeButton.selectedTag())
 				let hasC1540 = vic20HasC1540Button.state == .on
-				switch vic20RegionButton.selectedItem!.tag {
+				switch vic20RegionButton.selectedTag() {
 					case 1:
 						return CSStaticAnalyser(vic20Region: .american, memorySize: memorySize, hasC1540: hasC1540)
 					case 2:
@@ -327,10 +391,10 @@ class MachinePicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 				}
 
 			case "zx80":
-				return CSStaticAnalyser(zx80MemorySize: Kilobytes(zx80MemorySizeButton.selectedItem!.tag), useZX81ROM: zx80UsesZX81ROMButton.state == .on)
+				return CSStaticAnalyser(zx80MemorySize: Kilobytes(zx80MemorySizeButton.selectedTag()), useZX81ROM: zx80UsesZX81ROMButton.state == .on)
 
 			case "zx81":
-				return CSStaticAnalyser(zx81MemorySize: Kilobytes(zx81MemorySizeButton.selectedItem!.tag))
+				return CSStaticAnalyser(zx81MemorySize: Kilobytes(zx81MemorySizeButton.selectedTag()))
 
 			default: return CSStaticAnalyser()
 		}

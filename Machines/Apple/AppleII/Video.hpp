@@ -51,8 +51,14 @@ class VideoBase: public VideoSwitches<Cycles> {
 		/// Gets the type of output.
 		Outputs::Display::DisplayType get_display_type() const;
 
+		/// Sets whether the current CRT should be recalibrated away from normative NTSC
+		/// to produce square pixels in 40-column text mode.
+		void set_use_square_pixels(bool);
+		bool get_use_square_pixels();
+
 	protected:
 		Outputs::CRT::CRT crt_;
+		bool use_square_pixels_ = false;
 
 		// State affecting output video stream generation.
 		uint8_t *pixel_pointer_ = nullptr;
@@ -393,7 +399,7 @@ template <class BusHandler, bool is_iie> class Video: public VideoBase {
 							// The OpenGL scan target introduces a phase error of 1/8th of a wave. The Metal one does not.
 							// Supply the real phase value if this is an Apple build.
 							// TODO: eliminate UGLY HACK.
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(IGNORE_APPLE)
 							constexpr int phase = 224;
 #else
 							constexpr int phase = 0;

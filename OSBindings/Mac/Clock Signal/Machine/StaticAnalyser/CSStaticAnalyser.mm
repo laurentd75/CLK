@@ -19,6 +19,7 @@
 #include "../../../../../Analyser/Static/AppleIIgs/Target.hpp"
 #include "../../../../../Analyser/Static/AtariST/Target.hpp"
 #include "../../../../../Analyser/Static/Commodore/Target.hpp"
+#include "../../../../../Analyser/Static/Enterprise/Target.hpp"
 #include "../../../../../Analyser/Static/Macintosh/Target.hpp"
 #include "../../../../../Analyser/Static/MSX/Target.hpp"
 #include "../../../../../Analyser/Static/Oric/Target.hpp"
@@ -125,6 +126,51 @@
 		target->has_pres_adfs = adfs;
 		target->has_ap6_rom = ap6;
 		target->has_sideways_ram = sidewaysRAM;
+		_targets.push_back(std::move(target));
+	}
+	return self;
+}
+
+- (instancetype)initWithEnterpriseModel:(CSMachineEnterpriseModel)model speed:(CSMachineEnterpriseSpeed)speed exosVersion:(CSMachineEnterpriseEXOS)exosVersion basicVersion:(CSMachineEnterpriseBASIC)basicVersion dos:(CSMachineEnterpriseDOS)dos {
+	self = [super init];
+	if(self) {
+		using Target = Analyser::Static::Enterprise::Target;
+		auto target = std::make_unique<Target>();
+
+		switch(model) {
+			case CSMachineEnterpriseModel64:		target->model = Target::Model::Enterprise64;		break;
+			default:
+			case CSMachineEnterpriseModel128:		target->model = Target::Model::Enterprise128;		break;
+			case CSMachineEnterpriseModel256:		target->model = Target::Model::Enterprise256;		break;
+		}
+
+		switch(speed) {
+			case CSMachineEnterpriseSpeed6MHz:		target->speed = Target::Speed::SixMHz;				break;
+			default:
+			case CSMachineEnterpriseSpeed4MHz:		target->speed = Target::Speed::FourMHz;				break;
+		}
+
+		switch(exosVersion) {
+			case CSMachineEnterpriseEXOSVersion21:	target->exos_version = Target::EXOSVersion::v21;	break;
+			default:
+			case CSMachineEnterpriseEXOSVersion20:	target->exos_version = Target::EXOSVersion::v20;	break;
+			case CSMachineEnterpriseEXOSVersion10:	target->exos_version = Target::EXOSVersion::v10;	break;
+		}
+
+		switch(basicVersion) {
+			case CSMachineEnterpriseBASICNone:		target->basic_version = Target::BASICVersion::None;	break;
+			default:
+			case CSMachineEnterpriseBASICVersion21:	target->basic_version = Target::BASICVersion::v21;	break;
+			case CSMachineEnterpriseBASICVersion11:	target->basic_version = Target::BASICVersion::v11;	break;
+			case CSMachineEnterpriseBASICVersion10:	target->basic_version = Target::BASICVersion::v10;	break;
+		}
+
+		switch(dos) {
+			case CSMachineEnterpriseDOSEXDOS:		target->dos = Target::DOS::EXDOS;					break;
+			default:
+			case CSMachineEnterpriseDOSNone:		target->dos = Target::DOS::None;					break;
+		}
+
 		_targets.push_back(std::move(target));
 	}
 	return self;
@@ -276,6 +322,7 @@ static Analyser::Static::ZX8081::Target::MemoryModel ZX8081MemoryModelFromSize(K
 		case Analyser::Machine::AtariST:		return @"CompositeOptions";
 		case Analyser::Machine::ColecoVision:	return @"CompositeOptions";
 		case Analyser::Machine::Electron:		return @"QuickLoadCompositeOptions";
+		case Analyser::Machine::Enterprise:		return @"CompositeOptions";
 		case Analyser::Machine::Macintosh:		return @"MacintoshOptions";
 		case Analyser::Machine::MasterSystem:	return @"CompositeOptions";
 		case Analyser::Machine::MSX:			return @"QuickLoadCompositeOptions";
@@ -307,6 +354,10 @@ static Analyser::Static::ZX8081::Target::MemoryModel ZX8081MemoryModelFromSize(K
 
 - (void)applyToMachine:(CSMachine *)machine {
 	[machine applyMedia:_media];
+}
+
+- (BOOL)empty {
+	return _media.empty();
 }
 
 @end

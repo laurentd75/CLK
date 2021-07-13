@@ -112,11 +112,11 @@ void MainWindow::init() {
 	ui->setupUi(this);
 	romRequestBaseText = ui->missingROMsBox->toPlainText();
 
-	createActions();
-	restoreSelections();
-
 	// TEMPORARY: remove the Apple IIgs tab; this machine isn't ready yet.
 	ui->machineSelectionTabs->removeTab(ui->machineSelectionTabs->indexOf(ui->appleIIgsTab));
+
+	createActions();
+	restoreSelections();
 }
 
 void MainWindow::createActions() {
@@ -207,14 +207,15 @@ QString MainWindow::getFilename(const char *title) {
 	return fileName;
 }
 
-void MainWindow::insertFile(const QString &fileName) {
-	if(!machine) return;
+bool MainWindow::insertFile(const QString &fileName) {
+	if(!machine) return false;
 
 	auto mediaTarget = machine->media_target();
-	if(!mediaTarget) return;
+	if(!mediaTarget) return false;
 
-	Analyser::Static::Media media = Analyser::Static::GetMedia(fileName.toStdString());
-	mediaTarget->insert_media(media);
+	const Analyser::Static::Media media = Analyser::Static::GetMedia(fileName.toStdString());
+	if(media.empty()) return false;
+	return mediaTarget->insert_media(media);
 }
 
 bool MainWindow::launchFile(const QString &fileName) {
@@ -251,33 +252,33 @@ void MainWindow::tile(const QMainWindow *previous) {
 
 void MainWindow::launchMachine() {
 	const QStringList appDataLocations = QStandardPaths::standardLocations(QStandardPaths::AppDataLocation);
-	missingRoms.clear();
 
 	ROMMachine::ROMFetcher rom_fetcher = [&appDataLocations, this]
-		(const std::vector<ROMMachine::ROM> &roms) -> std::vector<std::unique_ptr<std::vector<uint8_t>>> {
-		std::vector<std::unique_ptr<std::vector<uint8_t>>> results;
+		(const ROM::Request &roms) -> ROM::Map {
+		ROM::Map results;
 
-		for(const auto &rom: roms) {
-			FILE *file = nullptr;
-			for(const auto &path: appDataLocations) {
-				const std::string source = path.toStdString() + "/ROMImages/" + rom.machine_name + "/" + rom.file_name;
-				const std::string nativeSource = QDir::toNativeSeparators(QString::fromStdString(source)).toStdString();
+		for(const auto &description: roms.all_descriptions()) {
+			for(const auto &file_name: description.file_names) {
+				FILE *file = nullptr;
+				for(const auto &path: appDataLocations) {
+					const std::string source = path.toStdString() + "/ROMImages/" + description.machine_name + "/" + file_name;
+					const std::string nativeSource = QDir::toNativeSeparators(QString::fromStdString(source)).toStdString();
 
-				file = fopen(nativeSource.c_str(), "rb");
-				if(file) break;
-			}
+					file = fopen(nativeSource.c_str(), "rb");
+					if(file) break;
+				}
 
-			if(file) {
-				auto data = fileContentsAndClose(file);
-				if(data) {
-					results.push_back(std::move(data));
-					continue;
+				if(file) {
+					auto data = fileContentsAndClose(file);
+					if(data) {
+						results[description.name] = *data;
+						continue;
+					}
 				}
 			}
-
-			results.push_back(nullptr);
-			missingRoms.push_back(rom);
 		}
+
+		missingRoms = roms.subtract(results);
 		return results;
 	};
 	Machine::Error error;
@@ -291,22 +292,7 @@ void MainWindow::launchMachine() {
 
 				// Populate request text.
 				QString requestText = romRequestBaseText;
-				size_t index = 0;
-				for(const auto &rom: missingRoms) {
-					requestText += "• ";
-					requestText += rom.descriptive_name.c_str();
-
-					++index;
-					if(index == missingRoms.size()) {
-						requestText += ".\n";
-						continue;
-					}
-					if(index == missingRoms.size() - 1) {
-						requestText += "; and\n";
-						continue;
-					}
-					requestText += ";\n";
-				}
+				requestText += QString::fromWCharArray(missingRoms.description(0, L'•').c_str());
 				ui->missingROMsBox->setPlainText(requestText);
 			} break;
 		}
@@ -418,7 +404,7 @@ void MainWindow::launchMachine() {
 		break;
 
 		case Analyser::Machine::AppleII:
-			addDisplayMenu(settingsPrefix, "Colour", "Monochrome", "", "");
+			addAppleIIMenu();
 		break;
 
 		case Analyser::Machine::Atari2600:
@@ -436,6 +422,10 @@ void MainWindow::launchMachine() {
 		case Analyser::Machine::Electron:
 			addDisplayMenu(settingsPrefix, "Composite", "", "S-Video", "RGB");
 			addEnhancementsMenu(settingsPrefix, true, false);
+		break;
+
+		case Analyser::Machine::Enterprise:
+			addDisplayMenu(settingsPrefix, "Composite", "", "", "RGB");
 		break;
 
 		case Analyser::Machine::Macintosh:
@@ -686,6 +676,41 @@ void MainWindow::toggleAtari2600Switch(Atari2600Switch toggleSwitch) {
 	});
 }
 
+void MainWindow::addAppleIIMenu() {
+	// Add the standard display settings.
+	addDisplayMenu("appleII", "Colour", "Monochrome", "", "");
+
+	// Add an additional tick box, for square pixels.
+	QAction *const squarePixelsAction = new QAction(tr("Square Pixels"));
+	squarePixelsAction->setCheckable(true);
+	connect(squarePixelsAction, &QAction::triggered, this, [=] {
+		std::lock_guard lock_guard(machineMutex);
+
+		// Apply the new setting to the machine.
+		setAppleIISquarePixels(squarePixelsAction->isChecked());
+
+		// Also store it.
+		Settings settings;
+		settings.setValue("appleII.squarePixels", squarePixelsAction->isChecked());
+	});
+	displayMenu->addAction(squarePixelsAction);
+
+	// Establish initial selection.
+	Settings settings;
+	const bool useSquarePixels = settings.value("appleII.squarePixels").toBool();
+	squarePixelsAction->setChecked(useSquarePixels);
+	setAppleIISquarePixels(useSquarePixels);
+}
+
+void MainWindow::setAppleIISquarePixels(bool squarePixels) {
+	Configurable::Device *const configurable = machine->configurable_device();
+	auto options = configurable->get_options();
+	auto appleii_options = static_cast<Apple::II::Machine::Options *>(options.get());
+
+	appleii_options->use_square_pixels = squarePixels;
+	configurable->set_options(options);
+}
+
 void MainWindow::speaker_did_complete_samples(Outputs::Speaker::Speaker *, const std::vector<int16_t> &buffer) {
 	audioBuffer.write(buffer);
 }
@@ -712,7 +737,10 @@ void MainWindow::dropEvent(QDropEvent* event) {
 		case UIPhase::RunningMachine: {
 			// Attempt to insert into the running machine.
 			const auto fileName = event->mimeData()->urls()[0].toLocalFile();
-			insertFile(fileName);
+			if(!insertFile(fileName)) {
+				deleteMachine();
+				launchFile(fileName);
+			}
 		} break;
 
 		// TODO: permit multiple files dropped at once in both of the above cases.
@@ -736,28 +764,23 @@ void MainWindow::dropEvent(QDropEvent* event) {
 				CRC::CRC32 generator;
 				const uint32_t crc = generator.compute_crc(*contents);
 
-				bool wasUsed = false;
-				for(const auto &rom: missingRoms) {
-					if(std::find(rom.crc32s.begin(), rom.crc32s.end(), crc) != rom.crc32s.end()) {
-						foundROM = true;
+				std::optional<ROM::Description> target_rom = ROM::Description::from_crc(crc);
+				if(target_rom) {
+					// Ensure the destination folder exists.
+					const std::string path = appDataLocation + "/ROMImages/" + target_rom->machine_name;
+					const QDir dir(QString::fromStdString(path));
+					if (!dir.exists())
+						dir.mkpath(".");
 
-						// Ensure the destination folder exists.
-						const std::string path = appDataLocation + "/ROMImages/" + rom.machine_name;
-						const QDir dir(QString::fromStdString(path));
-						if (!dir.exists())
-							dir.mkpath(".");
+					// Write into place.
+					const std::string destination =  QDir::toNativeSeparators(QString::fromStdString(path+ "/" + target_rom->file_names[0])).toStdString();
+					FILE *const target = fopen(destination.c_str(), "wb");
+					fwrite(contents->data(), 1, contents->size(), target);
+					fclose(target);
 
-						// Write into place.
-						const std::string destination =  QDir::toNativeSeparators(QString::fromStdString(path+ "/" + rom.file_name)).toStdString();
-						FILE *const target = fopen(destination.c_str(), "wb");
-						fwrite(contents->data(), 1, contents->size(), target);
-						fclose(target);
-
-						wasUsed = true;
-					}
-				}
-
-				if(!wasUsed) {
+					// Note that at least one meaningful ROM was supplied.
+					foundROM = true;
+				} else {
 					if(!unusedRoms.isEmpty()) unusedRoms += ", ";
 					unusedRoms += url.fileName();
 				}
@@ -851,176 +874,10 @@ void MainWindow::keyReleaseEvent(QKeyEvent *event) {
 	processEvent(event);
 }
 
-// Qt is the worst.
-//
-// Assume your keyboard has a key labelled both . and >, as they do on US and UK keyboards. Call it the dot key.
-// Perform the following:
-//	1.	press dot key;
-//	2.	press shift key;
-//	3.	release dot key;
-//	4.	release shift key.
-//
-// Per empirical testing, and key repeat aside, on both macOS and Ubuntu 19.04 that sequence will result in
-// _three_ keypress events, but only _two_ key release events. You'll get presses for Qt::Key_Period, Qt::Key_Greater
-// and Qt::Key_Shift. You'll get releases only for Qt::Key_Greater and Qt::Key_Shift.
-//
-// How can you detect at runtime that Key_Greater and Key_Period are the same physical key?
-//
-// You can't. On Ubuntu they have the same values for QKeyEvent::nativeScanCode(), which are unique to the key,
-// but they have different ::nativeVirtualKey()s.
-//
-// On macOS they have the same ::nativeScanCode() only because on macOS [almost] all keys have the same
-// ::nativeScanCode(). So that's not usable. They have the same ::nativeVirtualKey()s, but since that isn't true
-// on Ubuntu, that's also not usable.
-//
-// So how can you track the physical keys on a keyboard via Qt?
-//
-// You can't. Qt is the worst. SDL doesn't have this problem, including in X11, but I'm not sure I want the extra
-// dependency. I may need to reassess.
-
-std::optional<Inputs::Keyboard::Key> MainWindow::keyForEvent(QKeyEvent *event) {
-	// Workaround for X11: assume PC-esque mapping from ::nativeScanCode to symbols.
-	//
-	// Yucky, ugly, harcoded yuck. TODO: work out how `xmodmap -pke` seems to derive these codes at runtime.
-
-	if(QGuiApplication::platformName() == QLatin1String("xcb")) {
-#define BIND(code, key) 	case code:	return Inputs::Keyboard::Key::key;
-
-		switch(event->nativeScanCode()) {
-			default: qDebug() << "Unmapped" << event->nativeScanCode(); return {};
-
-			BIND(1, Escape);
-			BIND(67, F1);	BIND(68, F2);	BIND(69, F3);	BIND(70, F4);	BIND(71, F5);
-			BIND(72, F6);	BIND(73, F7);	BIND(74, F8);	BIND(75, F9);	BIND(76, F10);
-			BIND(95, F11);	BIND(96, F12);
-			BIND(107, PrintScreen);
-			BIND(78, ScrollLock);
-			BIND(127, Pause);
-
-			BIND(49, BackTick);
-			BIND(10, k1);	BIND(11, k2);	BIND(12, k3);	BIND(13, k4);	BIND(14, k5);
-			BIND(15, k6);	BIND(16, k7);	BIND(17, k8);	BIND(18, k9);	BIND(19, k0);
-			BIND(20, Hyphen);
-			BIND(21, Equals);
-			BIND(22, Backspace);
-
-			BIND(23, Tab);
-			BIND(24, Q);	BIND(25, W);	BIND(26, E);	BIND(27, R);	BIND(28, T);
-			BIND(29, Y);	BIND(30, U);	BIND(31, I);	BIND(32, O);	BIND(33, P);
-			BIND(34, OpenSquareBracket);
-			BIND(35, CloseSquareBracket);
-			BIND(51, Backslash);
-
-			BIND(66, CapsLock);
-			BIND(38, A);	BIND(39, S);	BIND(40, D);	BIND(41, F);	BIND(42, G);
-			BIND(43, H);	BIND(44, J);	BIND(45, K);	BIND(46, L);
-			BIND(47, Semicolon);
-			BIND(48, Quote);
-			BIND(36, Enter);
-
-			BIND(50, LeftShift);
-			BIND(52, Z);	BIND(53, X);	BIND(54, C);	BIND(55, V);
-			BIND(56, B);	BIND(57, N);	BIND(58, M);
-			BIND(59, Comma);
-			BIND(60, FullStop);
-			BIND(61, ForwardSlash);
-			BIND(62, RightShift);
-
-			BIND(105, LeftControl);
-			BIND(204, LeftOption);
-			BIND(205, LeftMeta);
-			BIND(65, Space);
-			BIND(108, RightOption);
-
-			BIND(113, Left);	BIND(114, Right);	BIND(111, Up);	BIND(116, Down);
-
-			BIND(118, Insert);
-			BIND(119, Delete);
-			BIND(110, Home);
-			BIND(115, End);
-
-			BIND(77, NumLock);
-
-			BIND(106, KeypadSlash);
-			BIND(63, KeypadAsterisk);
-			BIND(91, KeypadDelete);
-			BIND(79, Keypad7);	BIND(80, Keypad8);	BIND(81, Keypad9);	BIND(86, KeypadPlus);
-			BIND(83, Keypad4);	BIND(84, Keypad5);	BIND(85, Keypad6);	BIND(82, KeypadMinus);
-			BIND(87, Keypad1);	BIND(88, Keypad2);	BIND(89, Keypad3);	BIND(104, KeypadEnter);
-			BIND(90, Keypad0);
-			BIND(129, KeypadDecimalPoint);
-			BIND(125, KeypadEquals);
-
-			BIND(146, Help);
-		}
-
-#undef BIND
-	}
-
-	// Fall back on a limited, faulty adaptation.
-#define BIND2(qtKey, clkKey) case Qt::qtKey: return Inputs::Keyboard::Key::clkKey;
-#define BIND(key) BIND2(Key_##key, key)
-
-	switch(event->key()) {
-		default: return {};
-
-		BIND(Escape);
-		BIND(F1);	BIND(F2);	BIND(F3);	BIND(F4);	BIND(F5);	BIND(F6);
-		BIND(F7);	BIND(F8);	BIND(F9);	BIND(F10);	BIND(F11);	BIND(F12);
-		BIND2(Key_Print, PrintScreen);
-		BIND(ScrollLock);	BIND(Pause);
-
-		BIND2(Key_AsciiTilde, BackTick);
-		BIND2(Key_1, k1);	BIND2(Key_2, k2);	BIND2(Key_3, k3);	BIND2(Key_4, k4);	BIND2(Key_5, k5);
-		BIND2(Key_6, k6);	BIND2(Key_7, k7);	BIND2(Key_8, k8);	BIND2(Key_9, k9);	BIND2(Key_0, k0);
-		BIND2(Key_Minus, Hyphen);
-		BIND2(Key_Plus, Equals);
-		BIND(Backspace);
-
-		BIND(Tab);	BIND(Q);	BIND(W);	BIND(E);	BIND(R);	BIND(T);	BIND(Y);
-		BIND(U);	BIND(I);	BIND(O);	BIND(P);
-		BIND2(Key_BraceLeft, OpenSquareBracket);
-		BIND2(Key_BraceRight, CloseSquareBracket);
-		BIND(Backslash);
-
-		BIND(CapsLock);	BIND(A);	BIND(S);	BIND(D);	BIND(F);	BIND(G);
-		BIND(H);		BIND(J);	BIND(K);	BIND(L);
-		BIND(Semicolon);
-		BIND2(Key_Apostrophe, Quote);
-		BIND2(Key_QuoteDbl, Quote);
-		// TODO: something to hash?
-		BIND2(Key_Return, Enter);
-
-		BIND2(Key_Shift, LeftShift);
-		BIND(Z);	BIND(X);	BIND(C);	BIND(V);
-		BIND(B);	BIND(N);	BIND(M);
-		BIND(Comma);
-		BIND2(Key_Period, FullStop);
-		BIND2(Key_Slash, ForwardSlash);
-		// Omitted: right shift.
-
-		BIND2(Key_Control, LeftControl);
-		BIND2(Key_Alt, LeftOption);
-		BIND2(Key_Meta, LeftMeta);
-		BIND(Space);
-		BIND2(Key_AltGr, RightOption);
-
-		BIND(Left);	BIND(Right);	BIND(Up);	BIND(Down);
-
-		BIND(Insert); BIND(Home);	BIND(PageUp);	BIND(Delete);	BIND(End);	BIND(PageDown);
-
-		BIND(NumLock);
-	}
-
-#undef BIND
-#undef BIND2
-}
-
-
 bool MainWindow::processEvent(QKeyEvent *event) {
 	if(!machine) return true;
 
-	const auto key = keyForEvent(event);
+	const auto key = keyMapper.keyForEvent(event);
 	if(!key) return true;
 
 	const bool isPressed = event->type() == QEvent::KeyPress;
@@ -1100,6 +957,7 @@ void MainWindow::setButtonPressed(int index, bool isPressed) {
 #include "../../Analyser/Static/AppleIIgs/Target.hpp"
 #include "../../Analyser/Static/AtariST/Target.hpp"
 #include "../../Analyser/Static/Commodore/Target.hpp"
+#include "../../Analyser/Static/Enterprise/Target.hpp"
 #include "../../Analyser/Static/Macintosh/Target.hpp"
 #include "../../Analyser/Static/MSX/Target.hpp"
 #include "../../Analyser/Static/Oric/Target.hpp"
@@ -1120,6 +978,7 @@ void MainWindow::startMachine() {
 	TEST(amstradCPC);
 	TEST(atariST);
 	TEST(electron);
+	TEST(enterprise);
 	TEST(macintosh);
 	TEST(msx);
 	TEST(oric);
@@ -1200,6 +1059,43 @@ void MainWindow::start_electron() {
 	target->has_pres_adfs = ui->electronADFSCheckBox->isChecked();
 	target->has_ap6_rom = ui->electronAP6CheckBox->isChecked();
 	target->has_sideways_ram = ui->electronSidewaysRAMCheckBox->isChecked();
+
+	launchTarget(std::move(target));
+}
+
+void MainWindow::start_enterprise() {
+	using Target = Analyser::Static::Enterprise::Target;
+	auto target = std::make_unique<Target>();
+
+	switch(ui->enterpriseModelComboBox->currentIndex()) {
+		default:	target->model = Target::Model::Enterprise64;	break;
+		case 1:		target->model = Target::Model::Enterprise128;	break;
+		case 2:		target->model = Target::Model::Enterprise256;	break;
+	}
+
+	switch(ui->enterpriseSpeedComboBox->currentIndex()) {
+		default:	target->speed = Target::Speed::FourMHz;	break;
+		case 1:		target->speed = Target::Speed::SixMHz;	break;
+	}
+
+	switch(ui->enterpriseEXOSComboBox->currentIndex()) {
+		default:	target->exos_version = Target::EXOSVersion::v10;	break;
+		case 1:		target->exos_version = Target::EXOSVersion::v20;	break;
+		case 2:		target->exos_version = Target::EXOSVersion::v21;	break;
+		case 3:		target->exos_version = Target::EXOSVersion::v23;	break;
+	}
+
+	switch(ui->enterpriseBASICComboBox->currentIndex()) {
+		default:	target->basic_version = Target::BASICVersion::None;	break;
+		case 1:		target->basic_version = Target::BASICVersion::v10;	break;
+		case 2:		target->basic_version = Target::BASICVersion::v11;	break;
+		case 3:		target->basic_version = Target::BASICVersion::v21;	break;
+	}
+
+	switch(ui->enterpriseDOSComboBox->currentIndex()) {
+		default:	target->dos = Target::DOS::None;	break;
+		case 1:		target->dos = Target::DOS::EXDOS;	break;
+	}
 
 	launchTarget(std::move(target));
 }
@@ -1359,6 +1255,13 @@ void MainWindow::launchTarget(std::unique_ptr<Analyser::Static::Target> &&target
 	CheckBox(electronAP6CheckBox, "electron.hasAP6");					\
 	CheckBox(electronSidewaysRAMCheckBox, "electron.fillSidewaysRAM");	\
 																		\
+	/* Enterprise. */													\
+	ComboBox(enterpriseModelComboBox, "enterprise.model");				\
+	ComboBox(enterpriseSpeedComboBox, "enterprise.speed");				\
+	ComboBox(enterpriseEXOSComboBox, "enterprise.exos");				\
+	ComboBox(enterpriseBASICComboBox, "enterprise.basic");				\
+	ComboBox(enterpriseDOSComboBox, "enterprise.dos");					\
+																		\
 	/* Macintosh. */													\
 	ComboBox(macintoshModelComboBox, "macintosh.model");				\
 																		\
@@ -1412,6 +1315,7 @@ void MainWindow::restoreSelections() {
 // MARK: - Activity observation
 
 void MainWindow::addActivityObserver() {
+	ledStatuses.clear();
 	auto activitySource = machine->activity_source();
 	if(!activitySource) return;
 
