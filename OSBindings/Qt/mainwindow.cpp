@@ -441,6 +441,10 @@ void MainWindow::launchMachine() {
 			addAtari2600Menu();
 		break;
 
+		case Analyser::Machine::Archimedes:
+			addEnhancementsMenu(settingsPrefix, true, false);
+		break;
+
 		case Analyser::Machine::AtariST:
 			addDisplayMenu(settingsPrefix, "Television", "", "", "Monitor");
 		break;
@@ -1010,6 +1014,7 @@ void MainWindow::startMachine() {
 	TEST(appleII);
 	TEST(appleIIgs);
 	TEST(amstradCPC);
+	TEST(archimedes);
 	TEST(atariST);
 	TEST(electron);
 	TEST(enterprise);
@@ -1100,6 +1105,12 @@ void MainWindow::start_amstradCPC() {
 	launchTarget(std::move(target));
 }
 
+void MainWindow::start_archimedes() {
+	using Target = Analyser::Static::Acorn::ArchimedesTarget;
+	auto target = std::make_unique<Target>();
+	launchTarget(std::move(target));
+}
+
 void MainWindow::start_atariST() {
 	using Target = Analyser::Static::AtariST::Target;
 	auto target = std::make_unique<Target>();
@@ -1114,7 +1125,7 @@ void MainWindow::start_atariST() {
 }
 
 void MainWindow::start_electron() {
-	using Target = Analyser::Static::Acorn::Target;
+	using Target = Analyser::Static::Acorn::ElectronTarget;
 	auto target = std::make_unique<Target>();
 
 	target->has_dfs = ui->electronDFSCheckBox->isChecked();

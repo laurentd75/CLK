@@ -12,8 +12,10 @@
 #include "../../../Outputs/CRT/CRT.hpp"
 
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 
 namespace Archimedes {
 
@@ -26,7 +28,7 @@ struct Video {
 		ram_(ram),
 		crt_(Outputs::Display::InputDataType::Red4Green4Blue4) {
 		set_clock_divider(3);
-		crt_.set_visible_area(Outputs::Display::Rect(0.06f, 0.07f, 0.9f, 0.9f));
+		crt_.set_visible_area(Outputs::Display::Rect(0.041f, 0.04f, 0.95f, 0.95f));
 		crt_.set_display_type(Outputs::Display::DisplayType::RGB);
 	}
 
@@ -78,9 +80,7 @@ struct Video {
 				horizontal_timing_.cursor_start = (value >> 13) & 0x7ff;
 				cursor_shift_ = (value >> 11) & 3;
 			break;
-			case 0x9c:
-				logger.error().append("TODO: Video horizontal interlace: %d", (value >> 14) & 0x3ff);
-			break;
+			case 0x9c:	horizontal_timing_.interlace_sync_position = timing_value(value);	break;
 
 			case 0xa0:	vertical_timing_.period = timing_value(value);			break;
 			case 0xa4:	vertical_timing_.sync_width = timing_value(value);		break;
@@ -92,8 +92,6 @@ struct Video {
 			case 0xbc:	vertical_timing_.cursor_end = timing_value(value);		break;
 
 			case 0xe0:
-				logger.error().append("TODO: video control: %08x", value);
-
 				// Set pixel rate. This is the value that a 24Mhz clock should be divided
 				// by to get half the pixel rate.
 				switch(value & 0b11) {
@@ -105,6 +103,9 @@ struct Video {
 
 				// Set colour depth.
 				colour_depth_ = Depth((value >> 2) & 0b11);
+
+				// Crib interlace-enable.
+				vertical_timing_.is_interlaced = value & (1 << 6);
 			break;
 
 			//
@@ -117,7 +118,7 @@ struct Video {
 			} break;
 
 			case 0xc0:
-				sound_.set_frequency(value & 0x7f);
+				sound_.set_frequency(value & 0xff);
 			break;
 
 			default:
@@ -131,18 +132,28 @@ struct Video {
 		horizontal_state_.increment_position(horizontal_timing_);
 
 		if(horizontal_state_.did_restart()) {
+			end_horizontal();
+
 			const auto old_phase = vertical_state_.phase();
 			vertical_state_.increment_position(vertical_timing_);
-			pixel_count_ = 0;
 
 			const auto phase = vertical_state_.phase();
 			if(phase != old_phase) {
-				// I don't have good information on this; first guess: copy frame and
-				// cursor start addresses into counters at the start of the first vertical
-				// display line.
+				// Copy frame and cursor start addresses into counters at the
+				// start of the first vertical display line.
 				if(phase == Phase::Display) {
 					address_ = frame_start_;
 					cursor_address_ = cursor_start_;
+
+					// Accumulate a count of how many times the processor has tried
+					// to update the visible buffer more than once in a frame; this
+					// will usually indicate that the software being run isn't properly
+					// synchronised to actual machine speed.
+					++frame_starts_;
+					if(frame_start_sets_ > 10) {
+						overages_ += frame_start_sets_ > frame_starts_;
+						frame_start_sets_ = frame_starts_ = 0;
+					}
 				}
 				if(old_phase == Phase::Display) {
 					entered_flyback_ = true;
@@ -167,57 +178,9 @@ struct Video {
 			cursor_pixel_ = 32;
 		}
 
-		// Accumulate total phase.
-		++time_in_phase_;
-
-		// Determine current output phase.
-		Phase new_phase;
-		switch(vertical_state_.phase()) {
-			case Phase::Sync:	new_phase = Phase::Sync;	break;
-			case Phase::Blank:	new_phase = Phase::Blank;	break;
-			case Phase::Border:
-				new_phase = horizontal_state_.phase() == Phase::Display ? Phase::Border : horizontal_state_.phase();
-			break;
-			case Phase::Display:
-				new_phase = horizontal_state_.phase();
-			break;
-		}
-
-		const auto flush_pixels = [&]() {
-			const auto duration = static_cast<int>(time_in_phase_);
-			crt_.output_data(duration, static_cast<size_t>(time_in_phase_) * 2);
-			time_in_phase_ = 0;
-			pixels_ = nullptr;
-		};
-
-		// Possibly output something.
-		if(new_phase != phase_) {
-			if(time_in_phase_) {
-				const auto duration = static_cast<int>(time_in_phase_);
-
-				switch(phase_) {
-					case Phase::Sync:		crt_.output_sync(duration);									break;
-					case Phase::Blank:		crt_.output_blank(duration);								break;
-					case Phase::Display:	flush_pixels();												break;
-					case Phase::Border:		crt_.output_level<uint16_t>(duration, border_colour_);		break;
-				}
-				time_in_phase_ = 0;
-			}
-			phase_ = new_phase;
-		}
-
-		// Update cursor pixel counter if applicable; this might mean triggering it
-		// and it might just mean advancing it if it has already been triggered.
-		if(vertical_state_.cursor_active) {
-			const auto pixel_position = horizontal_state_.position << 1;
-			if(pixel_position <= horizontal_timing_.cursor_start && (pixel_position + 2) > horizontal_timing_.cursor_start) {
-				cursor_pixel_ = int(horizontal_timing_.cursor_start) - int(pixel_position);
-			}
-		}
-
-		// Grab some more pixels if appropriate.
+		// Fetch if relevant display signals are active.
 		if(vertical_state_.display_active() && horizontal_state_.display_active()) {
-			const auto next_byte = [&]() -> uint8_t {
+			const auto next_byte = [&]() {
 				const auto next = ram_[address_];
 				++address_;
 
@@ -226,98 +189,28 @@ struct Video {
 				if(address_ == buffer_end_ + 16) {
 					address_ = buffer_start_;
 				}
-				return next;
+				bitmap_queue_[bitmap_queue_pointer_ & 7] = next;
+				++bitmap_queue_pointer_;
 			};
 
 			switch(colour_depth_) {
-				case Depth::EightBPP:
-					pixel_data_[0] = next_byte();
-					pixel_data_[1] = next_byte();
-				break;
-				case Depth::FourBPP:
-					pixel_data_[0] = next_byte();
-				break;
-				case Depth::TwoBPP:
-					if(!(pixel_count_&1)) {
-						pixel_data_[0] = next_byte();
-					}
-				break;
-				case Depth::OneBPP:
-					if(!(pixel_count_&3)) {
-						pixel_data_[0] = next_byte();
-					}
-				break;
-			}
-			++pixel_count_;
-		}
-
-		if(phase_ == Phase::Display) {
-			if(pixels_ && time_in_phase_ == PixelBufferSize/2) {
-				flush_pixels();
-			}
-
-			if(!pixels_) {
-				if(time_in_phase_) {
-					flush_pixels();
-				}
-
-				pixels_ = reinterpret_cast<uint16_t *>(crt_.begin_data(PixelBufferSize));
-			}
-
-			if(pixels_) {
-				// Each tick in here is two ticks of the pixel clock, so:
-				//
-				//	8bpp mode: output two bytes;
-				//	4bpp mode: output one byte;
-				//	2bpp mode: output one byte every second tick;
-				//	1bpp mode: output one byte every fourth tick.
-				switch(colour_depth_) {
-					case Depth::EightBPP:
-						pixels_[0] = (colours_[pixel_data_[0] & 0xf] & colour(0b0111'0011'0111)) | high_spread[pixel_data_[0] >> 4];
-						pixels_[1] = (colours_[pixel_data_[1] & 0xf] & colour(0b0111'0011'0111)) | high_spread[pixel_data_[1] >> 4];
-					break;
-
-					case Depth::FourBPP:
-						pixels_[0] = colours_[pixel_data_[0] & 0xf];
-						pixels_[1] = colours_[pixel_data_[0] >> 4];
-					break;
-
-					case Depth::TwoBPP:
-						pixels_[0] = colours_[pixel_data_[0] & 3];
-						pixels_[1] = colours_[(pixel_data_[0] >> 2) & 3];
-						pixel_data_[0] >>= 4;
-					break;
-
-					case Depth::OneBPP:
-						pixels_[0] = colours_[pixel_data_[0] & 1];
-						pixels_[1] = colours_[(pixel_data_[0] >> 1) & 1];
-						pixel_data_[0] >>= 2;
-					break;
-				}
-
-				// Overlay cursor if applicable.
-				// TODO: pull this so far out that the cursor can display over the border, too.
-				if(cursor_pixel_ < 32) {
-					if(cursor_pixel_ >= 0) {
-						const auto pixel = cursor_image_[static_cast<size_t>(cursor_pixel_)];
-						if(pixel) {
-							pixels_[0] = cursor_colours_[pixel];
-						}
-					}
-					if(cursor_pixel_ < 31) {
-						const auto pixel = cursor_image_[static_cast<size_t>(cursor_pixel_ + 1)];
-						if(pixel) {
-							pixels_[1] = cursor_colours_[pixel];
-						}
-					}
-				}
-
-				pixels_ += 2;
+				case Depth::EightBPP:		next_byte();	next_byte();		break;
+				case Depth::FourBPP:		next_byte();						break;
+				case Depth::TwoBPP:			if(!(pixel_count_&3)) next_byte();	break;
+				case Depth::OneBPP:			if(!(pixel_count_&7)) next_byte();	break;
 			}
 		}
 
-		// Advance cursor position.
-		if(cursor_pixel_ < 32) cursor_pixel_ += 2;
+		// Move along line.
+		switch(vertical_state_.phase()) {
+			case Phase::Sync:					tick_horizontal<Phase::Sync>();						break;
+			case Phase::Blank:					tick_horizontal<Phase::Blank>();					break;
+			case Phase::Border:					tick_horizontal<Phase::Border>();					break;
+			case Phase::Display:				tick_horizontal<Phase::Display>();					break;
+			case Phase::StartInterlacedSync:	tick_horizontal<Phase::StartInterlacedSync>();		break;
+			case Phase::EndInterlacedSync:		tick_horizontal<Phase::EndInterlacedSync>();		break;
+		}
+		++time_in_phase_;
 	}
 
 	/// @returns @c true if a vertical retrace interrupt has been signalled since the last call to @c interrupt(); @c false otherwise.
@@ -332,7 +225,10 @@ struct Video {
 		return vertical_state_.phase() != Phase::Display;
 	}
 
-	void set_frame_start(uint32_t address) 	{	frame_start_ = address;		}
+	void set_frame_start(uint32_t address) 	{
+		frame_start_ = address;
+		++frame_start_sets_;
+	}
 	void set_buffer_start(uint32_t address)	{	buffer_start_ = address;	}
 	void set_buffer_end(uint32_t address)	{	buffer_end_ = address;		}
 	void set_cursor_start(uint32_t address)	{	cursor_start_ = address;	}
@@ -342,6 +238,34 @@ struct Video {
 
 	int clock_divider() const {
 		return static_cast<int>(clock_divider_);
+	}
+
+	int frame_rate_overages() const {
+		return overages_;
+	}
+
+	void set_dma_enabled(bool dma_enabled) {
+		dma_enabled_ = dma_enabled;
+	}
+
+	//
+	// The following is provided for input automation;
+	// it does not correlate with real hardware functionality.
+	//
+	std::optional<std::pair<int, int>> cursor_location() {
+		if(
+			!dma_enabled_ ||
+			vertical_timing_.cursor_end <= vertical_timing_.cursor_start ||
+			horizontal_timing_.cursor_start >= (horizontal_timing_.period * 2)
+
+		) {
+			return std::nullopt;
+		}
+
+		const auto horizontal_start = horizontal_timing_.display_start + horizontal_state_.output_latency(colour_depth_);
+		return std::make_pair(
+			int(horizontal_timing_.cursor_start) + 6 - int(horizontal_start * 2),
+			int(vertical_timing_.cursor_start) - int(vertical_timing_.display_start));
 	}
 
 private:
@@ -354,6 +278,7 @@ private:
 	// being deferred to the component itself.
 	const uint8_t *ram_ = nullptr;
 	Outputs::CRT::CRT crt_;
+	bool dma_enabled_ = false;
 
 	// Horizontal and vertical timing.
 	struct Timing {
@@ -365,34 +290,88 @@ private:
 		uint32_t display_end = 0;
 		uint32_t cursor_start = 0;
 		uint32_t cursor_end = 0;
+
+		uint32_t interlace_sync_position = 0;
+		bool is_interlaced = false;
 	};
 	uint32_t cursor_shift_ = 0;
 	Timing horizontal_timing_, vertical_timing_;
 
+	enum class Depth {
+		OneBPP = 0b00,
+		TwoBPP = 0b01,
+		FourBPP = 0b10,
+		EightBPP = 0b11,
+	};
+
 	// Current video state.
 	enum class Phase {
-		Sync, Blank, Border, Display,
+		Sync, Blank, Border, Display, StartInterlacedSync, EndInterlacedSync,
 	};
+	template <bool is_vertical>
 	struct State {
 		uint32_t position = 0;
+		uint32_t display_start = 0;
+		uint32_t display_end = 0;
+
+		bool is_odd_iteration_ = false;
 
 		void increment_position(const Timing &timing) {
-			++position;
-			if(position == 1024) position = 0;
-
-			if(position == timing.period) {
-				state = DidRestart;
-				position = 0;
+			const auto previous_override = interlace_override_;
+			if constexpr (is_vertical) {
+				interlace_override_ = Phase::Sync;	// i.e. no override.
 			}
-
-			if(position == timing.sync_width)		state |= SyncEnded;
-			if(position == timing.display_start)	state |= DisplayStarted;
-			if(position == timing.display_end)		state |= DisplayEnded;
+			if(position == timing.sync_width)		{
+				state |= SyncEnded;
+				if(is_vertical && timing.is_interlaced && is_odd_iteration_ && previous_override == Phase::Sync) {
+					--position;
+					interlace_override_ = Phase::EndInterlacedSync;
+				}
+			}
+			if(position == timing.display_start)	{ state |= DisplayStarted; display_start = position; }
+			if(position == timing.display_end)		{ state |= DisplayEnded; display_end = position; }
 			if(position == timing.border_start)		state |= BorderStarted;
 			if(position == timing.border_end)		state |= BorderEnded;
 
 			cursor_active |= position == timing.cursor_start;
 			cursor_active &= position != timing.cursor_end;
+
+			if(position == timing.period) {
+				state = DidRestart;
+				position = 0;
+				is_odd_iteration_ ^= true;
+
+				// Both display start and end need to be seeded as bigger than can be reached,
+				// while having some overhead for addition.
+				display_end = display_start = std::numeric_limits<uint32_t>::max() >> 1;
+
+				// Possibly label the next as a start-of-interlaced-sync.
+				if(is_vertical && timing.is_interlaced && is_odd_iteration_) {
+					interlace_override_ = Phase::StartInterlacedSync;
+				}
+			} else {
+				++position;
+				if(position == 1024) position = 0;
+			}
+		}
+
+		bool is_outputting(Depth depth) const {
+			const auto latency = output_latency(depth);
+			return position >= display_start + latency && position < display_end + latency;
+		}
+
+		uint32_t output_cycle(Depth depth) const {
+			return position - display_start - output_latency(depth);
+		}
+
+		static constexpr uint32_t output_latencies[] = {
+			19 >> 1,		// 1 bpp.
+			11 >> 1,		// 2 bpp.
+			7 >> 1,			// 4 bpp.
+			5 >> 1			// 8 bpp.
+		};
+		uint32_t output_latency(Depth depth) const {
+			return output_latencies[static_cast<uint32_t>(depth)];
 		}
 
 		static constexpr uint8_t SyncEnded = 0x1;
@@ -402,6 +381,7 @@ private:
 		static constexpr uint8_t DisplayEnded = 0x10;
 		static constexpr uint8_t DidRestart = 0x20;
 		uint8_t state = 0;
+		Phase interlace_override_ = Phase::Sync;
 
 		bool cursor_active = false;
 
@@ -415,34 +395,50 @@ private:
 			return (state & DisplayStarted) && !(state & DisplayEnded);
 		}
 
-		Phase phase() const {
-			// TODO: turn the following logic into a 32-entry lookup table.
+		Phase phase(Phase horizontal_fallback = Phase::Border) const {
+			if(is_vertical && interlace_override_ != Phase::Sync) {
+				return interlace_override_;
+			}
+			// TODO: turn the following logic into a lookup table.
 			if(!(state & SyncEnded)) {
 				return Phase::Sync;
 			}
 			if(!(state & BorderStarted) || (state & BorderEnded)) {
 				return Phase::Blank;
 			}
+			if constexpr (!is_vertical) {
+				return horizontal_fallback;
+			}
+
 			if(!(state & DisplayStarted) || (state & DisplayEnded)) {
 				return Phase::Border;
 			}
 			return Phase::Display;
 		}
 	};
-	State horizontal_state_, vertical_state_;
-	Phase phase_ = Phase::Sync;
-	uint32_t time_in_phase_ = 0;
-	uint32_t pixel_count_ = 0;
+	State<false> horizontal_state_;
+	State<true> vertical_state_;
+
+	int time_in_phase_ = 0;
+	Phase phase_;
+	uint16_t phased_border_colour_;
+
+	int pixel_count_ = 0;
+	int display_area_start_ = 0;
 	uint16_t *pixels_ = nullptr;
 
 	// It is elsewhere assumed that this size is a multiple of 8.
-	static constexpr size_t PixelBufferSize = 320;
+	static constexpr size_t PixelBufferSize = 256;
 
 	// Programmer-set addresses.
 	uint32_t buffer_start_ = 0;
 	uint32_t buffer_end_ = 0;
 	uint32_t frame_start_ = 0;
 	uint32_t cursor_start_ = 0;
+
+	int frame_start_sets_ = 0;
+	int frame_starts_ = 0;
+	int overages_ = 0;
 
 	// Ephemeral address state.
 	uint32_t address_ = 0;
@@ -451,9 +447,6 @@ private:
 	uint32_t cursor_address_ = 0;
 	int cursor_pixel_ = 0;
 	std::array<uint8_t, 32> cursor_image_;
-
-	// Ephemeral graphics data.
-	uint8_t pixel_data_[2]{};
 
 	// Colour palette, converted to internal format.
 	uint16_t border_colour_;
@@ -470,13 +463,12 @@ private:
 	// the pixel clock because that's the fidelity at which the programmer
 	// places horizontal events — display start, end, sync period, etc.
 	uint32_t clock_divider_ = 0;
+	Depth colour_depth_;
 
-	enum class Depth {
-		OneBPP = 0b00,
-		TwoBPP = 0b01,
-		FourBPP = 0b10,
-		EightBPP = 0b11,
-	} colour_depth_;
+	// A temporary buffer that holds video contents during the latency
+	// period between their generation and their output.
+	uint8_t bitmap_queue_[8];
+	int bitmap_queue_pointer_ = 0;
 
 	void set_clock_divider(uint32_t divider) {
 		if(divider == clock_divider_) {
@@ -494,6 +486,169 @@ private:
 			Outputs::CRT::PAL::VerticalSyncLength,
 			Outputs::CRT::PAL::AlternatesPhase);
 		clock_rate_observer_.update_clock_rates();
+	}
+
+	void flush_pixels() {
+		crt_.output_data(time_in_phase_, static_cast<size_t>(pixel_count_));
+		time_in_phase_ = 0;
+		pixel_count_ = 0;
+		pixels_ = nullptr;
+	}
+
+	void set_phase(Phase phase) {
+		if(time_in_phase_) {
+			switch(phase_) {
+				default:				crt_.output_sync(time_in_phase_);									break;
+				case Phase::Blank:		crt_.output_blank(time_in_phase_);									break;
+				case Phase::Border:		crt_.output_level<uint16_t>(time_in_phase_, phased_border_colour_);	break;
+				case Phase::Display:	flush_pixels();														break;
+			}
+		}
+
+		phase_ = phase;
+		time_in_phase_ = 0;
+		phased_border_colour_ = border_colour_;
+		pixel_count_ = 0;
+	}
+
+	void end_horizontal() {
+		set_phase(Phase::Sync);
+		display_area_start_ = -1;
+		bitmap_queue_pointer_ = 0;
+	}
+
+	template <Phase vertical_phase> void tick_horizontal() {
+		// Sync lines: obey nothing. All sync, all the time.
+		if constexpr (vertical_phase == Phase::Sync) {
+			return;
+		}
+
+		// Start interlaced sync lines: do blank from horizontal sync up to the programmed
+		// cutoff, then do sync.
+		if constexpr (vertical_phase == Phase::StartInterlacedSync) {
+			if(phase_ == Phase::Sync && horizontal_state_.phase() != Phase::Sync) {
+				set_phase(Phase::Blank);
+			}
+			if(phase_ == Phase::Blank && horizontal_state_.position == horizontal_timing_.interlace_sync_position) {
+				set_phase(Phase::Sync);
+			}
+			return;
+		}
+
+		// End interlaced sync lines: do sync up to the programmed cutoff, then do blank.
+		if constexpr (vertical_phase == Phase::EndInterlacedSync) {
+			if(phase_ == Phase::Sync && horizontal_state_.position == horizontal_timing_.interlace_sync_position) {
+				set_phase(Phase::Blank);
+			}
+			return;
+		}
+
+		// Blank lines: obey only the transition from sync to non-sync.
+		if constexpr (vertical_phase == Phase::Blank) {
+			if(phase_ == Phase::Sync && horizontal_state_.phase() != Phase::Sync) {
+				set_phase(Phase::Blank);
+			}
+			return;
+		}
+
+		// Border lines: ignore display phases; also  reset the border phase if the colour changes.
+		if constexpr (vertical_phase == Phase::Border) {
+			const auto phase = horizontal_state_.phase(Phase::Border);
+			if(phase != phase_ || (phase_ == Phase::Border && border_colour_ != phased_border_colour_)) {
+				set_phase(phase);
+			}
+			return;
+		}
+
+		if constexpr (vertical_phase != Phase::Display) {
+			// Should be impossible.
+			assert(false);
+		}
+
+		// Some timing facts, to explain what would otherwise be magic constants.
+		static constexpr int CursorDelay = 5;	// The cursor will appear six pixels after its programmed trigger point.
+												// ... BUT! Border and display are currently a pixel early. So move the
+												// cursor for alignment.
+
+		// Deal with sync and blank via set_phase(); collapse display and border into Phase::Display.
+		const auto phase = horizontal_state_.phase(Phase::Display);
+		if(phase != phase_) set_phase(phase);
+
+		// Update cursor pixel counter if applicable; this might mean triggering it
+		// and it might just mean advancing it if it has already been triggered.
+		cursor_pixel_ += 2;
+		if(vertical_state_.cursor_active) {
+			const auto pixel_position = horizontal_state_.position << 1;
+			if(pixel_position <= horizontal_timing_.cursor_start && (pixel_position + 2) > horizontal_timing_.cursor_start) {
+				cursor_pixel_ = int(horizontal_timing_.cursor_start) - int(pixel_position) - CursorDelay;
+			}
+		}
+
+		// If this is not [collapsed] Phase::Display, just stop here.
+		if(phase_ != Phase::Display) return;
+
+		// Display phase: maintain an output buffer (if available).
+		if(pixel_count_ == PixelBufferSize)	flush_pixels();
+		if(!pixel_count_)					pixels_ = reinterpret_cast<uint16_t *>(crt_.begin_data(PixelBufferSize));
+
+		// Output.
+		if(pixels_) {
+			// Paint the border colour for potential painting over.
+
+			if(horizontal_state_.is_outputting(colour_depth_)) {
+				const auto source = horizontal_state_.output_cycle(colour_depth_);
+
+				// TODO: all below should be delayed an extra pixel. As should the border, actually. Fix up externally?
+				switch(colour_depth_) {
+					case Depth::EightBPP: {
+						const uint8_t *bitmap = &bitmap_queue_[(source << 1) & 7];
+						pixels_[0] = (colours_[bitmap[0] & 0xf] & colour(0b0111'0011'0111)) | high_spread[bitmap[0] >> 4];
+						pixels_[1] = (colours_[bitmap[1] & 0xf] & colour(0b0111'0011'0111)) | high_spread[bitmap[1] >> 4];
+					} break;
+
+					case Depth::FourBPP:
+						pixels_[0] = colours_[bitmap_queue_[source & 7] & 0xf];
+						pixels_[1] = colours_[bitmap_queue_[source & 7] >> 4];
+					break;
+
+					case Depth::TwoBPP: {
+						uint8_t &bitmap = bitmap_queue_[(source >> 1) & 7];
+						pixels_[0] = colours_[bitmap & 3];
+						pixels_[1] = colours_[(bitmap >> 2) & 3];
+						bitmap >>= 4;
+					} break;
+
+					case Depth::OneBPP: {
+						uint8_t &bitmap = bitmap_queue_[(source >> 2) & 7];
+						pixels_[0] = colours_[bitmap & 1];
+						pixels_[1] = colours_[(bitmap >> 1) & 1];
+						bitmap >>= 2;
+					} break;
+				}
+			} else {
+				pixels_[0] = pixels_[1] = border_colour_;
+			}
+
+			// Overlay cursor if applicable.
+			if(cursor_pixel_ < 32) {
+				if(cursor_pixel_ >= 0) {
+					const auto pixel = cursor_image_[static_cast<size_t>(cursor_pixel_)];
+					if(pixel) {
+						pixels_[0] = cursor_colours_[pixel];
+					}
+				}
+				if(cursor_pixel_ >= -1 && cursor_pixel_ < 31) {
+					const auto pixel = cursor_image_[static_cast<size_t>(cursor_pixel_ + 1)];
+					if(pixel) {
+						pixels_[1] = cursor_colours_[pixel];
+					}
+				}
+			}
+
+			pixels_ += 2;
+		}
+
+		pixel_count_ += 2;
 	}
 };
 

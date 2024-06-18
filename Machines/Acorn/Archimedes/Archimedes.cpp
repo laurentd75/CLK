@@ -15,6 +15,8 @@
 #include "MemoryController.hpp"
 #include "Sound.hpp"
 
+#include "../../../Configurable/Configurable.hpp"
+
 #include "../../AudioProducer.hpp"
 #include "../../KeyboardMachine.hpp"
 #include "../../MediaTarget.hpp"
@@ -29,293 +31,14 @@
 #include "../../../Outputs/Log.hpp"
 #include "../../../Components/I2C/I2C.hpp"
 
+#include "../../../Analyser/Static/Acorn/Target.hpp"
+
 #include <algorithm>
 #include <array>
 #include <set>
 #include <vector>
 
 namespace Archimedes {
-
-#ifndef NDEBUG
-namespace {
-Log::Logger<Log::Source::Archimedes> logger;
-}
-
-template <InstructionSet::ARM::Model model, typename Executor>
-struct HackyDebugger {
-	void notify(uint32_t address, uint32_t instruction, Executor &executor) {
-		pc_history[pc_history_ptr] = address;
-		pc_history_ptr = (pc_history_ptr + 1) % pc_history.size();
-
-//			if(
-//				executor_.pc() > 0x038021d0 &&
-//					last_r1 != executor_.registers()[1]
-//					 ||
-//				(
-//					last_link != executor_.registers()[14] ||
-//					last_r0 != executor_.registers()[0] ||
-//					last_r10 != executor_.registers()[10] ||
-//					last_r1 != executor_.registers()[1]
-//				)
-//			) {
-//				logger.info().append("%08x modified R14 to %08x; R0 to %08x; R10 to %08x; R1 to %08x",
-//					last_pc,
-//					executor_.registers()[14],
-//					executor_.registers()[0],
-//					executor_.registers()[10],
-//					executor_.registers()[1]
-//				);
-//				logger.info().append("%08x modified R1 to %08x",
-//					last_pc,
-//					executor_.registers()[1]
-//				);
-//				last_link = executor_.registers()[14];
-//				last_r0 = executor_.registers()[0];
-//				last_r10 = executor_.registers()[10];
-//				last_r1 = executor_.registers()[1];
-//			}
-
-//			if(instruction == 0xe8fd7fff) {
-//				printf("At %08x [%d]; after last PC %08x and %zu ago was %08x\n",
-//					address,
-//					instr_count,
-//					pc_history[(pc_history_ptr - 2 + pc_history.size()) % pc_history.size()],
-//					pc_history.size(),
-//					pc_history[pc_history_ptr]);
-//			}
-//			last_r9 = executor_.registers()[9];
-
-//			log |= address == 0x038031c4;
-//			log |= instr_count == 53552731 - 30;
-//			log &= executor_.pc() != 0x000000a0;
-
-//			log = (executor_.pc() == 0x038162afc) || (executor_.pc() == 0x03824b00);
-//			log |= instruction & ;
-
-		// The following has the effect of logging all taken SWIs and their return codes.
-/*		if(
-			(instruction & 0x0f00'0000) == 0x0f00'0000 &&
-			executor.registers().test(InstructionSet::ARM::Condition(instruction >> 28))
-		) {
-			if(instruction & 0x2'0000) {
-				swis.emplace_back();
-				swis.back().count = swi_count++;
-				swis.back().opcode = instruction;
-				swis.back().address = executor.pc();
-				swis.back().return_address = executor.registers().pc(4);
-				for(int c = 0; c < 10; c++) swis.back().regs[c] = executor.registers()[uint32_t(c)];
-
-				// Possibly capture more detail.
-				//
-				// Cf. http://productsdb.riscos.com/support/developers/prm_index/numswilist.html
-				uint32_t pointer = 0;
-				switch(instruction & 0xfd'ffff) {
-					case 0x41501:
-						swis.back().swi_name = "MessageTrans_OpenFile";
-
-						// R0: pointer to file descriptor; R1: pointer to filename; R2: pointer to hold file data.
-						// (R0 and R1 are in the RMA if R2 = 0)
-						pointer = executor.registers()[1];
-					break;
-					case 0x41502:
-						swis.back().swi_name = "MessageTrans_Lookup";
-					break;
-					case 0x41506:
-						swis.back().swi_name = "MessageTrans_ErrorLookup";
-					break;
-
-					case 0x4028a:
-						swis.back().swi_name = "Podule_EnumerateChunksWithInfo";
-					break;
-
-					case 0x4000a:
-						swis.back().swi_name = "Econet_ReadLocalStationAndNet";
-					break;
-					case 0x4000e:
-						swis.back().swi_name = "Econet_SetProtection";
-					break;
-					case 0x40015:
-						swis.back().swi_name = "Econet_ClaimPort";
-					break;
-
-					case 0x40541:
-						swis.back().swi_name = "FileCore_Create";
-					break;
-
-					case 0x80156:
-					case 0x8015b:
-						swis.back().swi_name = "PDriver_MiscOpForDriver";
-					break;
-
-					case 0x05:
-						swis.back().swi_name = "OS_CLI";
-						pointer = executor.registers()[0];
-					break;
-					case 0x0d:
-						swis.back().swi_name = "OS_Find";
-						if(executor.registers()[0] >= 0x40) {
-							pointer = executor.registers()[1];
-						}
-					break;
-					case 0x1d:
-						swis.back().swi_name = "OS_Heap";
-					break;
-					case 0x1e:
-						swis.back().swi_name = "OS_Module";
-					break;
-
-					case 0x20:
-						swis.back().swi_name = "OS_Release";
-					break;
-					case 0x21:
-						swis.back().swi_name = "OS_ReadUnsigned";
-					break;
-					case 0x23:
-						swis.back().swi_name = "OS_ReadVarVal";
-
-						// R0: pointer to variable name.
-						pointer = executor.registers()[0];
-					break;
-					case 0x24:
-						swis.back().swi_name = "OS_SetVarVal";
-
-						// R0: pointer to variable name.
-						pointer = executor.registers()[0];
-					break;
-					case 0x26:
-						swis.back().swi_name = "OS_GSRead";
-					break;
-					case 0x27:
-						swis.back().swi_name = "OS_GSTrans";
-						pointer = executor.registers()[0];
-					break;
-					case 0x29:
-						swis.back().swi_name = "OS_FSControl";
-					break;
-					case 0x2a:
-						swis.back().swi_name = "OS_ChangeDynamicArea";
-					break;
-
-					case 0x4c:
-						swis.back().swi_name = "OS_ReleaseDeviceVector";
-					break;
-
-					case 0x43057:
-						swis.back().swi_name = "Territory_LowerCaseTable";
-					break;
-					case 0x43058:
-						swis.back().swi_name = "Territory_UpperCaseTable";
-					break;
-
-					case 0x42fc0:
-						swis.back().swi_name = "Portable_Speed";
-					break;
-					case 0x42fc1:
-						swis.back().swi_name = "Portable_Control";
-					break;
-				}
-
-				if(pointer) {
-					while(true) {
-						uint8_t next;
-						executor.bus.template read<uint8_t>(pointer, next, InstructionSet::ARM::Mode::Supervisor, false);
-						++pointer;
-
-						if(next < 32) break;
-						swis.back().value_name.push_back(static_cast<char>(next));
-					}
-				}
-
-			}
-
-			if(executor.registers().pc_status(0) & InstructionSet::ARM::ConditionCode::Overflow) {
-				logger.error().append("SWI called with V set");
-			}
-		}
-		if(!swis.empty() && executor.pc() == swis.back().return_address) {
-			// Overflow set => SWI failure.
-			auto &back = swis.back();
-			if(executor.registers().pc_status(0) & InstructionSet::ARM::ConditionCode::Overflow) {
-				auto info = logger.info();
-
-				info.append("[%d] Failed swi ", back.count);
-				if(back.swi_name.empty()) {
-					info.append("&%x", back.opcode & 0xfd'ffff);
-				} else {
-					info.append("%s", back.swi_name.c_str());
-				}
-
-				if(!back.value_name.empty()) {
-					info.append(" %s", back.value_name.c_str());
-				}
-
-				info.append(" @ %08x ", back.address);
-				for(uint32_t c = 0; c < 10; c++) {
-					info.append("r%d:%08x ", c, back.regs[c]);
-				}
-			}
-
-			swis.pop_back();
-		}*/
-
-		if(log) {
-			InstructionSet::ARM::Disassembler<model> disassembler;
-			InstructionSet::ARM::dispatch<model>(instruction, disassembler);
-
-			auto info = logger.info();
-			info.append("[%d] %08x: %08x\t\t%s\t prior:[",
-				instr_count,
-				executor.pc(),
-				instruction,
-				disassembler.last().to_string(executor.pc()).c_str());
-			for(uint32_t c = 0; c < 15; c++) {
-				info.append("r%d:%08x ", c, executor.registers()[c]);
-			}
-			info.append("]");
-		}
-//		opcodes.insert(instruction);
-//		if(accumulate) {
-//			int c = 0;
-//			for(auto instr : opcodes) {
-//				printf("0x%08x, ", instr);
-//				++c;
-//				if(!(c&15)) printf("\n");
-//			}
-//			accumulate = false;
-//		}
-
-		++instr_count;
-	}
-
-private:
-	std::array<uint32_t, 75> pc_history;
-	std::size_t pc_history_ptr = 0;
-	uint32_t instr_count = 0;
-	uint32_t swi_count = 0;
-
-	struct SWICall {
-		uint32_t count;
-		uint32_t opcode;
-		uint32_t address;
-		uint32_t regs[10];
-		uint32_t return_address;
-		std::string value_name;
-		std::string swi_name;
-	};
-	std::vector<SWICall> swis;
-	uint32_t last_pc = 0;
-//	uint32_t last_r9 = 0;
-	bool log = false;
-	bool accumulate = true;
-
-	std::set<uint32_t> opcodes;
-};
-#else
-template <InstructionSet::ARM::Model model, typename Executor>
-struct HackyDebugger {
-	void notify(uint32_t, uint32_t, Executor &) {}
-};
-#endif
 
 class ConcreteMachine:
 	public Machine,
@@ -325,10 +48,13 @@ class ConcreteMachine:
 	public MachineTypes::MouseMachine,
 	public MachineTypes::TimedMachine,
 	public MachineTypes::ScanProducer,
-	public Activity::Source
+	public Activity::Source,
+	public Configurable::Device
 {
 	private:
-		// TODO: pick a sensible clock rate; this is just code for '24 MIPS, please'.
+		Log::Logger<Log::Source::Archimedes> logger;
+
+		// This fictitious clock rate just means '24 MIPS, please'; it's divided elsewhere.
 		static constexpr int ClockRate = 24'000'000;
 
 		// Runs for 24 cycles, distributing calls to the various ticking subsystems
@@ -336,7 +62,7 @@ class ConcreteMachine:
 		//
 		// The implementation of this is coupled to the ClockRate above, hence its
 		// appearance here.
-		template <int video_divider>
+		template <int video_divider, bool original_speed>
 		void macro_tick() {
 			macro_counter_ -= 24;
 
@@ -349,46 +75,44 @@ class ConcreteMachine:
 			//	* timers: 2;
 			//	* sound: 1.
 
-			tick_cpu_video<0, video_divider>();		tick_cpu_video<1, video_divider>();
-			tick_cpu_video<2, video_divider>();		tick_floppy();
-			tick_cpu_video<3, video_divider>();		tick_cpu_video<4, video_divider>();
-			tick_cpu_video<5, video_divider>();		tick_floppy();
-			tick_cpu_video<6, video_divider>();		tick_cpu_video<7, video_divider>();
-			tick_cpu_video<8, video_divider>();		tick_floppy();
-			tick_cpu_video<9, video_divider>();		tick_cpu_video<10, video_divider>();
-			tick_cpu_video<11, video_divider>();	tick_floppy();
+			tick_cpu_video<0, video_divider, original_speed>();		tick_cpu_video<1, video_divider, original_speed>();
+			tick_cpu_video<2, video_divider, original_speed>();		tick_floppy();
+			tick_cpu_video<3, video_divider, original_speed>();		tick_cpu_video<4, video_divider, original_speed>();
+			tick_cpu_video<5, video_divider, original_speed>();		tick_floppy();
+			tick_cpu_video<6, video_divider, original_speed>();		tick_cpu_video<7, video_divider, original_speed>();
+			tick_cpu_video<8, video_divider, original_speed>();		tick_floppy();
+			tick_cpu_video<9, video_divider, original_speed>();		tick_cpu_video<10, video_divider, original_speed>();
+			tick_cpu_video<11, video_divider, original_speed>();	tick_floppy();
 			tick_timers();
 
-			tick_cpu_video<12, video_divider>();	tick_cpu_video<13, video_divider>();
-			tick_cpu_video<14, video_divider>();	tick_floppy();
-			tick_cpu_video<15, video_divider>();	tick_cpu_video<16, video_divider>();
-			tick_cpu_video<17, video_divider>();	tick_floppy();
-			tick_cpu_video<18, video_divider>();	tick_cpu_video<19, video_divider>();
-			tick_cpu_video<20, video_divider>();	tick_floppy();
-			tick_cpu_video<21, video_divider>();	tick_cpu_video<22, video_divider>();
-			tick_cpu_video<23, video_divider>();	tick_floppy();
+			tick_cpu_video<12, video_divider, original_speed>();	tick_cpu_video<13, video_divider, original_speed>();
+			tick_cpu_video<14, video_divider, original_speed>();	tick_floppy();
+			tick_cpu_video<15, video_divider, original_speed>();	tick_cpu_video<16, video_divider, original_speed>();
+			tick_cpu_video<17, video_divider, original_speed>();	tick_floppy();
+			tick_cpu_video<18, video_divider, original_speed>();	tick_cpu_video<19, video_divider, original_speed>();
+			tick_cpu_video<20, video_divider, original_speed>();	tick_floppy();
+			tick_cpu_video<21, video_divider, original_speed>();	tick_cpu_video<22, video_divider, original_speed>();
+			tick_cpu_video<23, video_divider, original_speed>();	tick_floppy();
 			tick_timers();
 			tick_sound();
 		}
 		int macro_counter_ = 0;
 
-		template <int offset, int video_divider>
+		template <int offset, int video_divider, bool original_speed>
 		void tick_cpu_video() {
 			if constexpr (!(offset % video_divider)) {
 				tick_video();
 			}
 
-#ifndef NDEBUG
 			// Debug mode: run CPU a lot slower. Actually at close to original advertised MIPS speed.
-			if constexpr (offset & 7) return;
-#endif
+			if constexpr (original_speed && (offset & 7)) return;
 			if constexpr (offset & 1) return;
 			tick_cpu();
 		}
 
 	public:
 		ConcreteMachine(
-			const Analyser::Static::Target &target,
+			const Analyser::Static::Acorn::ArchimedesTarget &target,
 			const ROMMachine::ROMFetcher &rom_fetcher
 		) : executor_(*this, *this, *this) {
 			set_clock_rate(ClockRate);
@@ -402,22 +126,229 @@ class ConcreteMachine:
 
 			executor_.bus.set_rom(roms.find(risc_os)->second);
 			insert_media(target.media);
+
+			if(!target.media.disks.empty()) {
+				autoload_phase_ = AutoloadPhase::WaitingForStartup;
+				target_program_ = target.main_program;
+			}
+
+			fill_pipeline(0);
 		}
 
 		void update_interrupts() {
 			using Exception = InstructionSet::ARM::Registers::Exception;
 
 			const int requests = executor_.bus.interrupt_mask();
-			if((requests & InterruptRequests::FIQ) && executor_.registers().interrupt<Exception::FIQ>()) {
+			if((requests & InterruptRequests::FIQ) && executor_.registers().would_interrupt<Exception::FIQ>()) {
+				pipeline_.reschedule(Pipeline::SWISubversion::FIQ);
 				return;
 			}
-			if(requests & InterruptRequests::IRQ) {
-				executor_.registers().interrupt<Exception::IRQ>();
+			if((requests & InterruptRequests::IRQ) && executor_.registers().would_interrupt<Exception::IRQ>()) {
+				pipeline_.reschedule(Pipeline::SWISubversion::IRQ);
 			}
 		}
 
 		void did_set_status() {
+			// This might have been a change of mode, so...
+			trans_ = executor_.registers().mode() == InstructionSet::ARM::Mode::User;
+			fill_pipeline(executor_.pc());
 			update_interrupts();
+		}
+
+		void did_set_pc() {
+			fill_pipeline(executor_.pc());
+		}
+
+		bool should_swi(uint32_t comment) {
+			using Exception = InstructionSet::ARM::Registers::Exception;
+			using SWISubversion = Pipeline::SWISubversion;
+
+			switch(pipeline_.swi_subversion()) {
+				case Pipeline::SWISubversion::None: {
+					// TODO: 400C1 to intercept create window 400C1 and positioning; then
+					// plot icon 400e2 to listen for icons in window. That'll give a click area.
+					// Probably also 400c2 which seems to be used to add icons to the icon bar.
+					//
+					// 400D4 for menus?
+
+					const auto get_string = [&](uint32_t address, bool indirect) -> std::string {
+						std::string desc;
+						if(indirect) {
+							executor_.bus.read(address, address, false);
+						}
+						while(true) {
+							uint8_t next = 0;
+							executor_.bus.read(address, next, false);
+							if(next < 0x20) break;
+							desc.push_back(static_cast<char>(next) & 0x7f);
+							++address;
+						}
+						return desc;
+					};
+
+					const uint32_t swi_code = comment & static_cast<uint32_t>(~(1 << 17));
+					switch(swi_code) {
+						//
+						// Passive monitoring traps, for automatic loading.
+						//
+
+						case 0x400e3:	// Wimp_SetMode
+						case 0x65:		// OS_ScreenMode
+						case 0x3f:		// OS_CheckModeValid
+							if(autoload_phase_ == AutoloadPhase::OpeningProgram) {
+								autoload_phase_ = AutoloadPhase::Ended;
+							}
+						break;
+
+						case 0x400d4: {
+							if(autoload_phase_ == AutoloadPhase::TestingMenu) {
+								autoload_phase_ = AutoloadPhase::Ended;
+
+								uint32_t address = executor_.registers()[1] + 28;
+								bool should_left_click = true;
+
+								while(true) {
+									uint32_t icon_flags;
+									uint32_t item_flags;
+									executor_.bus.read(address, item_flags, false);
+									executor_.bus.read(address + 8, icon_flags, false);
+									auto desc = get_string(address + 12, icon_flags & (1 << 8));
+
+									should_left_click &=
+										(desc == "Info") ||
+										(desc == "Quit");
+
+									address += 24;
+									if(item_flags & (1 << 7)) break;
+								}
+
+								if(should_left_click) {
+									// Exit the application menu, then click once further to launch.
+									CursorActionBuilder(cursor_actions_)
+										.move_to(IconBarProgramX - 128, IconBarY - 32)
+										.click(0)
+										.move_to(IconBarProgramX, IconBarY)
+										.click(0);
+								}
+							}
+						} break;
+
+						// Wimp_OpenWindow.
+						case 0x400c5: {
+							const uint32_t address = executor_.registers()[1];
+							uint32_t x1, y1, x2, y2;
+							executor_.bus.read(address + 4, x1, false);
+							executor_.bus.read(address + 8, y1, false);
+							executor_.bus.read(address + 12, x2, false);
+							executor_.bus.read(address + 16, y2, false);
+
+							switch(autoload_phase_) {
+								default: break;
+
+								case AutoloadPhase::WaitingForDiskContents: {
+									autoload_phase_ = AutoloadPhase::WaitingForTargetIcon;
+
+									// Crib top left of window content.
+									target_window_[0] = static_cast<int32_t>(x1);
+									target_window_[1] = static_cast<int32_t>(y2);
+								} break;
+
+								case AutoloadPhase::WaitingForStartup:
+									if(static_cast<int32_t>(y1) == -268435472) {		// VERY TEMPORARY. TODO: find better trigger.
+										// Creation of any icon is used to spot that RISC OS has started up.
+										//
+										// Wait a further second, mouse down to (32, 240), left click.
+										// That'll trigger disk access. Then move up to the top left,
+										// in anticipation of the appearance of a window.
+										auto &builder = CursorActionBuilder(cursor_actions_)
+											.move_to(IconBarDriveX, IconBarY)
+											.click(0);
+
+										if(target_program_.empty()) {
+											autoload_phase_ = AutoloadPhase::Ended;
+										} else {
+											autoload_phase_ = AutoloadPhase::WaitingForDiskContents;
+											builder.move_to(IconBarDriveX, 80);	// Just a guess of 'close' to where the program to launch
+																				// will probably be, to have the cursor broadly nearby.
+										}
+									}
+								break;
+							}
+						} break;
+
+						// Wimp_CreateIcon, which also adds to the icon bar.
+						case 0x400c2:
+							switch(autoload_phase_) {
+								case AutoloadPhase::OpeningProgram: {
+									const uint32_t address = executor_.registers()[1];
+									uint32_t handle;
+									executor_.bus.read(address, handle, false);
+
+									// Test whether the program has added an icon on the right.
+									if(static_cast<int32_t>(handle) == -1) {
+										CursorActionBuilder(cursor_actions_)
+											.move_to(IconBarProgramX, IconBarY)
+											.click(1);
+										autoload_phase_ = AutoloadPhase::TestingMenu;
+									}
+								} break;
+
+								default: break;
+							}
+						break;
+
+						// Wimp_PlotIcon.
+						case 0x400e2: {
+							if(autoload_phase_ == AutoloadPhase::WaitingForTargetIcon) {
+								const uint32_t address = executor_.registers()[1];
+								uint32_t flags;
+								executor_.bus.read(address + 16, flags, false);
+
+								std::string desc;
+								if(flags & 1) {
+									desc = get_string(address + 20, flags & (1 << 8));
+								}
+
+								if(desc == target_program_) {
+									uint32_t x1, y1, x2, y2;
+									executor_.bus.read(address + 0, x1, false);
+									executor_.bus.read(address + 4, y1, false);
+									executor_.bus.read(address + 8, x2, false);
+									executor_.bus.read(address + 12, y2, false);
+
+									autoload_phase_ = AutoloadPhase::OpeningProgram;
+
+									// Some default icon sizing assumptions are baked in here.
+									const auto x_target = target_window_[0] + (static_cast<int32_t>(x1) + static_cast<int32_t>(x2)) / 2;
+									const auto y_target = target_window_[1] + static_cast<int32_t>(y1) + 24;
+									CursorActionBuilder(cursor_actions_)
+										.move_to(x_target >> 1, 256 - (y_target >> 2))
+										.double_click(0);
+								}
+							}
+						} break;
+					}
+				} return true;
+
+				case SWISubversion::DataAbort:
+//					executor_.set_pc(executor_.pc() - 4);
+					executor_.registers().exception<Exception::DataAbort>();
+				break;
+
+				// FIQ and IRQ decrement the PC because their apperance in the pipeline causes
+				// it to look as though they were fetched, but they weren't.
+				case SWISubversion::FIQ:
+					executor_.set_pc(executor_.pc() - 4);
+					executor_.registers().exception<Exception::FIQ>();
+				break;
+				case SWISubversion::IRQ:
+					executor_.set_pc(executor_.pc() - 4);
+					executor_.registers().exception<Exception::IRQ>();
+				break;
+			}
+
+			did_set_pc();
+			return false;
 		}
 
 		void update_clock_rates() {
@@ -434,40 +365,135 @@ class ConcreteMachine:
 		}
 
 		// MARK: - TimedMachine.
+		bool use_original_speed() const {
+#ifndef NDEBUG
+			// Debug mode: always run 'slowly' because that's less of a burden, and
+			// because it allows me to peer at problems with greater leisure.
+			return true;
+#else
+			// As a first, blunt implementation: try to model something close
+			// to original speed if there have been 10 frame rate overages in total.
+			return executor_.bus.video().frame_rate_overages() > 10;
+#endif
+		}
+
+
+		int video_divider_ = 1;
 		void run_for(Cycles cycles) override {
+			const auto run = [&](Cycles cycles) {
+				if(use_original_speed()) run_for<true>(cycles);
+				else run_for<false>(cycles);
+			};
+
+			//
+			// Short-circuit: no cursor actions means **just run**.
+			//
+			if(cursor_actions_.empty()) {
+				run(cycles);
+				return;
+			}
+
+			//
+			// Mouse scripting; tick at a minimum of frame length.
+			//
+			static constexpr int TickFrequency = 24'000'000 / 50;
+			cursor_action_subcycle_ += cycles;
+			auto segments = cursor_action_subcycle_.divide(Cycles(TickFrequency)).as<int>();
+			while(segments--) {
+				Cycles next = Cycles(TickFrequency);
+				if(next > cycles) next = cycles;
+				cycles -= next;
+
+				if(!cursor_actions_.empty()) {
+					const auto move_to_next = [&]() {
+						cursor_action_waited_ = 0;
+						cursor_actions_.erase(cursor_actions_.begin());
+					};
+
+					const auto &action = cursor_actions_.front();
+					switch(action.type) {
+						case CursorAction::Type::MoveTo: {
+							// A measure of where within the tip lies within
+							// the default RISC OS cursor.
+							constexpr int ActionPointOffset = 20;
+							constexpr int MaxStep = 24;
+
+							const auto position = executor_.bus.video().cursor_location();
+							if(!position) break;
+							const auto [x, y] = *position;
+
+							auto x_diff = action.value.move_to.x - (x + ActionPointOffset);
+							auto y_diff = action.value.move_to.y - y;
+
+							if(abs(x_diff) < 2 && abs(y_diff) < 2) {
+								move_to_next();
+								break;
+							}
+
+							if(abs(y_diff) > MaxStep || abs(x_diff) > MaxStep) {
+								if(abs(y_diff) > abs(x_diff)) {
+									x_diff = (x_diff * MaxStep + (abs(y_diff) >> 1)) / abs(y_diff);
+									y_diff = std::clamp(y_diff, -MaxStep, MaxStep);
+								} else {
+									y_diff = (y_diff * MaxStep + (abs(x_diff) >> 1)) / abs(x_diff);
+									x_diff = std::clamp(x_diff, -MaxStep, MaxStep);
+								}
+							}
+							get_mouse().move(x_diff, y_diff);
+						} break;
+						case CursorAction::Type::Wait:
+							cursor_action_waited_ += next.as<int>();
+							if(cursor_action_waited_ >= action.value.wait.duration) {
+								move_to_next();
+							}
+						break;
+						case CursorAction::Type::Button:
+							get_mouse().set_button_pressed(action.value.button.button, action.value.button.down);
+							move_to_next();
+						break;
+						case CursorAction::Type::SetPhase:
+							autoload_phase_ = action.value.set_phase.phase;
+							move_to_next();
+						break;
+					}
+				}
+
+				//
+				// Execution proper.
+				//
+				run(next);
+			}
+		}
+
+		template <bool original_speed>
+		void run_for(Cycles cycles) {
 			macro_counter_ += cycles.as<int>();
 
 			while(macro_counter_ > 0) {
 				switch(video_divider_) {
-					default:	macro_tick<2>();	break;
-					case 3:		macro_tick<3>();	break;
-					case 4:		macro_tick<4>();	break;
-					case 6:		macro_tick<6>();	break;
+					default:	macro_tick<2, original_speed>();	break;
+					case 3:		macro_tick<3, original_speed>();	break;
+					case 4:		macro_tick<4, original_speed>();	break;
+					case 6:		macro_tick<6, original_speed>();	break;
 				}
-
 			}
 		}
-		int video_divider_ = 1;
 
 		void tick_cpu() {
-			uint32_t instruction = 0;
-			if(!executor_.bus.read(executor_.pc(), instruction, executor_.registers().mode(), false)) {
-//				logger.info().append("Prefetch abort at %08x; last good was at %08x", executor_.pc(), last_pc);
-				executor_.prefetch_abort();
-
-				// TODO: does a double abort cause a reset?
-				executor_.bus.read(executor_.pc(), instruction, executor_.registers().mode(), false);
-			}
-			// TODO: pipeline prefetch?
-
-			debugger_.notify(executor_.pc(), instruction, executor_);
+			const uint32_t instruction = advance_pipeline(executor_.pc() + 8);
 			InstructionSet::ARM::execute(instruction, executor_);
 		}
 
 		void tick_timers()	{	executor_.bus.tick_timers();	}
 		void tick_sound()	{	executor_.bus.sound().tick();	}
 		void tick_video()	{	executor_.bus.video().tick();	}
-		void tick_floppy()	{	executor_.bus.tick_floppy();	}
+
+		bool accelerate_loading_ = true;
+		void tick_floppy()	{
+			executor_.bus.tick_floppy(
+				accelerate_loading_ ? (use_original_speed() ? 12 : 18) : 1
+			);
+		}
 
 		// MARK: - MediaTarget
 		bool insert_media(const Analyser::Static::Media &media) override {
@@ -478,6 +504,18 @@ class ConcreteMachine:
 				if(c == 4) break;
 			}
 			return true;
+		}
+
+		// MARK: - Configuration options.
+		std::unique_ptr<Reflection::Struct> get_options() final {
+			auto options = std::make_unique<Options>(Configurable::OptionsType::UserFriendly);
+			options->quickload = accelerate_loading_;
+			return options;
+		}
+
+		void set_options(const std::unique_ptr<Reflection::Struct> &str) final {
+			const auto options = dynamic_cast<Options *>(str.get());
+			accelerate_loading_ = options->quickload;
 		}
 
 		// MARK: - AudioProducer
@@ -497,9 +535,7 @@ class ConcreteMachine:
 		Archimedes::KeyboardMapper keyboard_mapper_;
 
 		void set_key_state(uint16_t key, bool is_pressed) override {
-			const int row = Archimedes::KeyboardMapper::row(key);
-			const int column = Archimedes::KeyboardMapper::column(key);
-			executor_.bus.keyboard().set_key_state(row, column, is_pressed);
+			executor_.bus.keyboard().set_key_state(key, is_pressed);
 		}
 
 		// MARK: - MouseMachine.
@@ -507,19 +543,210 @@ class ConcreteMachine:
 			return executor_.bus.keyboard().mouse();
 		}
 
-		// MARK: - ARM execution
+		// MARK: - ARM execution.
 		static constexpr auto arm_model = InstructionSet::ARM::Model::ARMv2;
 		using Executor = InstructionSet::ARM::Executor<arm_model, MemoryController<ConcreteMachine, ConcreteMachine>, ConcreteMachine>;
 		Executor executor_;
+		bool trans_ = false;
 
-		// MARK: - Yucky, temporary junk.
-		HackyDebugger<arm_model, Executor> debugger_;
+		void fill_pipeline(uint32_t pc) {
+			if(pipeline_.interrupt_next()) return;
+			advance_pipeline(pc);
+			advance_pipeline(pc + 4);
+		}
+
+		uint32_t advance_pipeline(uint32_t pc) {
+			uint32_t instruction = 0;	// Value should never be used; this avoids a spurious GCC warning.
+			const bool did_read = executor_.bus.read(pc, instruction, trans_);
+			return pipeline_.exchange(
+				did_read ? instruction : Pipeline::SWI,
+				did_read ? Pipeline::SWISubversion::None : Pipeline::SWISubversion::DataAbort);
+		}
+
+		struct Pipeline {
+			enum SWISubversion: uint8_t {
+				None,
+				DataAbort,
+				IRQ,
+				FIQ,
+			};
+
+			static constexpr uint32_t SWI = 0xef'000000;
+
+			uint32_t exchange(uint32_t next, SWISubversion subversion) {
+				const uint32_t result = upcoming_[active_].opcode;
+				latched_subversion_ = upcoming_[active_].subversion;
+
+				upcoming_[active_].opcode = next;
+				upcoming_[active_].subversion = subversion;
+				active_ ^= 1;
+
+				return result;
+			}
+
+			SWISubversion swi_subversion() const {
+				return latched_subversion_;
+			}
+
+			// TODO: one day, possibly: schedule the subversion one slot further into the future
+			// (i.e. active_ ^ 1) to allow one further instruction to occur as usual before the
+			// action paplies. That is, if interrupts take effect one instruction later after a flags
+			// change, which I don't yet know.
+			//
+			// In practice I got into a bit of a race condition between interrupt scheduling and
+			// flags changes, so have backed off for now.
+			void reschedule(SWISubversion subversion) {
+				upcoming_[active_].opcode = SWI;
+				upcoming_[active_].subversion = subversion;
+			}
+
+			bool interrupt_next() const {
+				return upcoming_[active_].subversion == SWISubversion::IRQ || upcoming_[active_].subversion == SWISubversion::FIQ;
+			}
+
+		private:
+			struct Stage {
+				uint32_t opcode;
+				SWISubversion subversion = SWISubversion::None;
+			};
+			Stage upcoming_[2];
+			int active_ = 0;
+
+			SWISubversion latched_subversion_;
+		} pipeline_;
+
+		// MARK: - Autoload, including cursor scripting.
+
+		enum class AutoloadPhase {
+			WaitingForStartup,
+			WaitingForDiskContents,
+			WaitingForTargetIcon,
+			OpeningProgram,
+			TestingMenu,
+			Ended,
+		};
+		AutoloadPhase autoload_phase_ = AutoloadPhase::Ended;
+		std::string target_program_;
+
+		struct CursorAction {
+			enum class Type {
+				MoveTo,
+				Button,
+				Wait,
+				SetPhase,
+			} type;
+
+			union {
+				struct {
+					int x, y;
+				} move_to;
+				struct {
+					int duration;
+				} wait;
+				struct {
+					int button;
+					bool down;
+				} button;
+				struct {
+					AutoloadPhase phase;
+				} set_phase;
+			} value;
+
+			static CursorAction move_to(int x, int y) {
+				CursorAction action;
+				action.type = Type::MoveTo;
+				action.value.move_to.x = x;
+				action.value.move_to.y = y;
+				return action;
+			}
+			static CursorAction wait(int duration) {
+				CursorAction action;
+				action.type = Type::Wait;
+				action.value.wait.duration = duration;
+				return action;
+			}
+			static CursorAction button(int button, bool down) {
+				CursorAction action;
+				action.type = Type::Button;
+				action.value.button.button = button;
+				action.value.button.down = down;
+				return action;
+			}
+			static CursorAction set_phase(AutoloadPhase phase) {
+				CursorAction action;
+				action.type = Type::SetPhase;
+				action.value.set_phase.phase = phase;
+				return action;
+			}
+		};
+
+		std::vector<CursorAction> cursor_actions_;
+
+		struct CursorActionBuilder {
+			CursorActionBuilder(std::vector<CursorAction> &actions) : actions_(actions) {}
+
+			CursorActionBuilder &wait(int duration) {
+				actions_.push_back(CursorAction::wait(duration));
+				return *this;
+			}
+
+			CursorActionBuilder &move_to(int x, int y) {
+				// Special case: if this sets a move_to when one is in progress,
+				// just update the target.
+				if(!actions_.empty() && actions_.back().type == CursorAction::Type::MoveTo) {
+					actions_.back().value.move_to.x = x;
+					actions_.back().value.move_to.y = y;
+					return *this;
+				}
+
+				actions_.push_back(CursorAction::move_to(x, y));
+				return *this;
+			}
+
+			CursorActionBuilder &click(int button) {
+				actions_.push_back(CursorAction::button(button, true));
+				actions_.push_back(CursorAction::wait(6'000'000));
+				actions_.push_back(CursorAction::button(button, false));
+				return *this;
+			}
+
+			CursorActionBuilder &double_click(int button) {
+				actions_.push_back(CursorAction::button(button, true));
+				actions_.push_back(CursorAction::wait(6'000'000));
+				actions_.push_back(CursorAction::button(button, false));
+				actions_.push_back(CursorAction::wait(6'000'000));
+				actions_.push_back(CursorAction::button(button, true));
+				actions_.push_back(CursorAction::wait(6'000'000));
+				actions_.push_back(CursorAction::button(button, false));
+				return *this;
+			}
+
+			CursorActionBuilder &set_phase(AutoloadPhase phase) {
+				actions_.push_back(CursorAction::set_phase(phase));
+				return *this;
+			}
+
+			std::vector<CursorAction> &actions_;
+		};
+		static constexpr int IconBarY = 240;
+		static constexpr int IconBarProgramX = 532;
+		static constexpr int IconBarDriveX = 32;
+
+		std::vector<CursorAction> &begin();
+
+		Cycles cursor_action_subcycle_;
+		int cursor_action_waited_;
+		int32_t target_window_[2];
 };
 
 }
 
 using namespace Archimedes;
 
-std::unique_ptr<Machine> Machine::Archimedes(const Analyser::Static::Target *target, const ROMMachine::ROMFetcher &rom_fetcher) {
-	return std::make_unique<ConcreteMachine>(*target, rom_fetcher);
+std::unique_ptr<Machine> Machine::Archimedes(
+	const Analyser::Static::Target *target,
+	const ROMMachine::ROMFetcher &rom_fetcher
+) {
+	const auto archimedes_target = dynamic_cast<const Analyser::Static::Acorn::ArchimedesTarget *>(target);
+	return std::make_unique<ConcreteMachine>(*archimedes_target, rom_fetcher);
 }
