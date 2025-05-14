@@ -26,9 +26,9 @@
 #include "Activity/Source.hpp"
 
 #include "InstructionSets/x86/Decoder.hpp"
+#include "InstructionSets/x86/Exceptions.hpp"
 #include "InstructionSets/x86/Flags.hpp"
 #include "InstructionSets/x86/Instruction.hpp"
-#include "InstructionSets/x86/Interrupts.hpp"
 #include "InstructionSets/x86/Perform.hpp"
 
 #include "Components/8255/i8255.hpp"
@@ -48,6 +48,7 @@
 #include "Analyser/Static/PCCompatible/Target.hpp"
 
 #include <array>
+#include <concepts>
 #include <iostream>
 #include <type_traits>
 
@@ -206,14 +207,12 @@ public:
 		pit_(pit), dma_(dma), ppi_(ppi), pics_(pics), video_(card), fdc_(fdc), keyboard_(keyboard), rtc_(rtc) {}
 
 	template <typename IntT>
+	requires std::same_as<IntT, uint8_t> || std::same_as<IntT, uint16_t>
 	void out(const uint16_t port, const IntT value) {
 		if constexpr (std::is_same_v<IntT, uint16_t>) {
 			out<uint8_t>(port, uint8_t(value));
 			out<uint8_t>(port + 1, uint8_t(value >> 8));
-			return;
 		} else {
-			static_assert(std::is_same_v<IntT, uint8_t>);
-
 			static constexpr auto log_unhandled = [](const uint16_t port, const uint8_t value) {
 				log.error().append("Unhandled out: %02x to %04x", value, port);
 			};
@@ -363,16 +362,16 @@ public:
 				case 0x03fc:	case 0x03fd:	case 0x03fe:	case 0x03ff:
 					// Ignore serial port accesses.
 				break;
-		}
+			}
 		}
 	}
 
-	template <typename IntT> IntT in(const uint16_t port) {
+	template <typename IntT>
+	requires std::same_as<IntT, uint16_t> || std::same_as<IntT, uint8_t>
+	IntT in(const uint16_t port) {
 		if constexpr (std::is_same_v<IntT, uint16_t>) {
 			return uint16_t(in<uint8_t>(port) | (in<uint8_t>(port + 1) << 8));
 		} else {
-			static_assert(std::is_same_v<IntT, uint8_t>);
-
 			static constexpr auto log_unhandled = [](const uint16_t port) {
 				log.error().append("Unhandled in: %04x", port);
 			};
@@ -513,14 +512,14 @@ public:
 
 	// Requirements for perform.
 	template <typename AddressT>
-	void jump(AddressT address) {
-		static_assert(std::is_same_v<AddressT, uint16_t>);
+	requires std::same_as<AddressT, uint16_t>
+	void jump(const AddressT address) {
 		registers_.ip() = address;
 	}
 
 	template <typename AddressT>
+	requires std::same_as<AddressT, uint16_t>
 	void jump(const uint16_t segment, const AddressT address) {
-		static_assert(std::is_same_v<AddressT, uint16_t>);
 
 		// TODO: preauthorise segment read.
 
@@ -691,12 +690,34 @@ public:
 	}
 
 	// MARK: - TimedMachine.
+	using Exception = InstructionSet::x86::Exception;
+
 	void run_for(const Cycles duration) final {
 		const auto pit_ticks = duration.as<int>();
-		constexpr bool is_fast = pc_model >= Analyser::Static::PCCompatible::Model::TurboXT;
+		constexpr int pit_multiplier = [] {
+			switch(pc_model) {
+				// This is implicitly treated as running at 1/3 the PIT clock = around 0.4 MIPS.
+				// i.e. a shade more than 8086 speed, if MIPS were meaningful.
+				case Analyser::Static::PCCompatible::Model::XT: return 1;
+
+				// Other multipliers are CPU instructions per PIT clock.
+				//
+				// 2*PIT = around 2.4 MIPS, broadly 80286 speed, if MIPS were a valid measure.
+				case Analyser::Static::PCCompatible::Model::TurboXT: return 2;
+
+				case Analyser::Static::PCCompatible::Model::AT: return 2;	// TODO: increase if/when no longer timing
+																			// dependent in BIOS boot (cf. test 11h,
+																			// RAM refresh rate versus execution rate)
+			}
+			// Other inevitably broad and fuzzy and inconsistent MIPS counts for my own potential future play:
+			//
+			// 80386 @ 20Mhz: 4–5 MIPS.
+			// 80486 @ 66Mhz: 25 MIPS.
+			// Pentium @ 100Mhz: 188 MIPS.
+		} ();
 
 		int ticks;
-		if constexpr (is_fast) {
+		if constexpr (pit_multiplier > 1) {
 			ticks = pit_ticks;
 		} else {
 			cpu_divisor_ += pit_ticks;
@@ -715,9 +736,8 @@ public:
 			pit_.run_for(1);
 			++speaker_.cycles_since_update;
 
-			// For original speed, the CPU performs instructions at a 1/3rd divider of the PIT clock,
-			// so run the PIT three times per 'tick'.
-			if constexpr (is_fast) {
+			// For the slow speed, run the PIT multiple times per CPU tick.
+			if constexpr (pit_multiplier == 1) {
 				pit_.run_for(1);
 				++speaker_.cycles_since_update;
 				pit_.run_for(1);
@@ -725,9 +745,9 @@ public:
 			}
 
 			//
-			// Advance CRTC at a more approximate rate.
+			// Advance CRTC.
 			//
-			video_.run_for(is_fast ? Cycles(1) : Cycles(3));
+			video_.run_for((pit_multiplier > 1) ? Cycles(1) : Cycles(3));
 
 			//
 			// Give the keyboard a notification of passing time; it's very approximately clocked,
@@ -751,7 +771,7 @@ public:
 
 				// Signal interrupt.
 				context_.flow_controller.unhalt();
-				perform_fault(pics_.pic[0].acknowledge());
+				fault(Exception::interrupt(pics_.pic[0].acknowledge()));
 			}
 
 			// Do nothing if currently halted.
@@ -759,22 +779,9 @@ public:
 				continue;
 			}
 
-			if constexpr (is_fast) {
-				// There's no divider applied, so this makes for 2*PIT = around 2.4 MIPS.
-				// That's broadly 80286 speed, if MIPS were a valid measure.
-				perform_instruction();
-				perform_instruction();
-			} else {
-				// With the clock divider above, this makes for a net of PIT/3 = around 0.4 MIPS.
-				// i.e. a shade more than 8086 speed, if MIPS were meaningful.
+			for(int c = 0; c < pit_multiplier; c++) {
 				perform_instruction();
 			}
-
-			// Other inevitably broad and fuzzy and inconsistent MIPS counts for my own potential future play:
-			//
-			// 80386 @ 20Mhz: 4–5 MIPS.
-			// 80486 @ 66Mhz: 25 MIPS.
-			// Pentium @ 100Mhz: 188 MIPS.
 		}
 	}
 
@@ -839,63 +846,40 @@ public:
 				);
 				return;
 			} catch (const InstructionSet::x86::Exception exception) {
-				perform_fault(exception);
+				fault(exception);
 			}
 		}
 	}
 
-	void perform_fault(const InstructionSet::x86::Exception exception) {
+	void fault(const Exception exception) {
 		if constexpr (uses_8086_exceptions(x86_model)) {
-			perform_real_interrupt(exception.cause);
-		} else {
-			using Interrupt = InstructionSet::x86::Interrupt;
-
-			// Regress the IP if this is an exception that posts the instruction's IP.
-			if(exception.internal && !posts_next_ip(Interrupt(exception.cause))) {
-				context_.registers.ip() = decoded_ip_;
-			}
-
-			if(!(context_.registers.msw() & InstructionSet::x86::MachineStatus::ProtectedModeEnable)) {
-				perform_real_interrupt(exception.cause);
-				return;
-			}
-
-			try {
-				printf("TODO!");
-				// TODO, I think:
-				//
-				//	(1) push e.code if this is an exception that has a code;
-				//	(2) if in protected mode, do _something_ with the IDT?
-				// 	(3) do the stuff of `InstructionSet::x86::interrupt` but possibly catch another exception.
-				//
-				//	... upon another exception: double fault.
-				//	... upon a third: reset.
-			} catch (const InstructionSet::x86::Exception exception) {
-				perform_double_fault(exception);
-			}
+			InstructionSet::x86::interrupt(
+				exception,
+				context_
+			);
+			return;
 		}
-	}
 
-	void perform_real_interrupt(const uint8_t code) {
-		printf("From %04x\n", decoded_ip_);
-//		should_log = true;
+		if(
+			exception.code_type == Exception::CodeType::Internal &&
+			!posts_next_ip(InstructionSet::x86::Vector(exception.vector))
+		) {
+			context_.registers.ip() = decoded_ip_;
+		}
+
 		try {
 			InstructionSet::x86::interrupt(
-				code,
+				exception,
 				context_
 			);
 		} catch (const InstructionSet::x86::Exception exception) {
-			perform_double_fault(exception);
+			// TODO: unsure about this. Probably just recurse?
+			printf("DOUBLE FAULT TODO!");
 		}
 	}
 
-	void perform_double_fault(const InstructionSet::x86::Exception exception) {
-		printf("DOUBLE TODO!");
-		(void)exception;
-	}
-
 	// MARK: - ScanProducer.
-	void set_scan_target(Outputs::Display::ScanTarget *scan_target) final {
+	void set_scan_target(Outputs::Display::ScanTarget *const scan_target) final {
 		video_.set_scan_target(scan_target);
 	}
 	Outputs::Display::ScanStatus get_scaled_scan_status() const final {
@@ -907,7 +891,7 @@ public:
 		return &speaker_.speaker;
 	}
 
-	void flush_output(int outputs) final {
+	void flush_output(const int outputs) final {
 		if(outputs & Output::Audio) {
 			speaker_.update();
 			speaker_.queue.perform();
@@ -930,12 +914,12 @@ public:
 		return &keyboard_mapper_;
 	}
 
-	void set_key_state(uint16_t key, bool is_pressed) final {
+	void set_key_state(const uint16_t key, const bool is_pressed) final {
 		keyboard_.post(uint8_t(key | (is_pressed ? 0x00 : 0x80)));
 	}
 
 	// MARK: - Activity::Source.
-	void set_activity_observer(Activity::Observer *observer) final {
+	void set_activity_observer(Activity::Observer *const observer) final {
 		fdc_.set_activity_observer(observer);
 	}
 
@@ -951,7 +935,7 @@ public:
 		set_video_signal_configurable(options->output);
 	}
 
-	void set_display_type(Outputs::Display::DisplayType display_type) final {
+	void set_display_type(const Outputs::Display::DisplayType display_type) final {
 		video_.set_display_type(display_type);
 
 		// Give the PPI a shout-out in case it isn't too late to switch to CGA40.
