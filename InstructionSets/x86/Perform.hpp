@@ -24,7 +24,7 @@ namespace InstructionSet::x86 {
 // Register interface requirements.
 // Chicken out for now: require prescribed class.
 //
-template <typename RegistersT, Model model>
+template <typename RegistersT>
 concept is_registers_16 = requires(RegistersT registers) {
 	{ registers.al() } -> std::same_as<uint8_t &>;
 	{ registers.ah() } -> std::same_as<uint8_t &>;
@@ -56,7 +56,29 @@ concept is_registers_16 = requires(RegistersT registers) {
 	{ registers.ss() } -> std::same_as<uint16_t &>;
 };
 
-template <typename RegistersT, Model model>
+template <typename RegistersT, DescriptorTable table>
+concept has_descriptor_table = requires(RegistersT registers) {
+	{ registers.template set<table>(DescriptorTablePointer{}) } -> std::same_as<void>;
+	{ registers.template get<table>() } -> std::same_as<const DescriptorTablePointer &>;
+};
+
+template <typename RegistersT>
+concept has_msw = requires(RegistersT registers) {
+	{ registers.set_msw(uint16_t{}) } -> std::same_as<void>;
+	{ registers.msw() } -> std::same_as<uint16_t>;
+
+	{ registers.set_ldtr(uint16_t{}) } -> std::same_as<void>;
+	{ registers.ldtr() } -> std::same_as<uint16_t>;
+};
+
+template <typename RegistersT>
+concept is_registers_protected =
+	has_msw<RegistersT> &&
+	has_descriptor_table<RegistersT, DescriptorTable::Global> &&
+	has_descriptor_table<RegistersT, DescriptorTable::Local> &&
+	has_descriptor_table<RegistersT, DescriptorTable::Interrupt>;
+
+template <typename RegistersT>
 concept is_registers_32 = requires(RegistersT registers) {
 	{ registers.eax() } -> std::same_as<uint32_t &>;
 	{ registers.ebx() } -> std::same_as<uint32_t &>;
@@ -76,8 +98,9 @@ concept is_registers_32 = requires(RegistersT registers) {
 
 template <typename RegistersT, Model model>
 concept is_registers =
-	is_registers_16<RegistersT, model> &&
-	(!has_32bit_instructions<model> || is_registers_32<RegistersT, model>);
+	is_registers_16<RegistersT> &&
+	(!has_protected_mode<model> || is_registers_protected<RegistersT>) &&
+	(!has_32bit_instructions<model> || is_registers_32<RegistersT>);
 
 //
 // Segment/descriptor interface requirements.
@@ -103,6 +126,8 @@ concept is_segments =
 template <typename LinearMemoryT, Model model>
 concept is_linear_memory = requires(LinearMemoryT memory) {
 	{ memory.template read<uint16_t>(uint32_t{}) } -> std::same_as<uint16_t>;
+	memory.preauthorise_read(uint32_t{}, uint32_t{});
+	memory.preauthorise_write(uint32_t{}, uint32_t{});
 };
 
 template <typename SegmentedMemoryT, typename AddressT, typename IntT, AccessType type>
@@ -141,9 +166,6 @@ template <typename SegmentedMemoryT, typename AddressT, typename IntT>
 concept supports_preauthorisations = requires(SegmentedMemoryT memory) {
 	memory.preauthorise_stack_write(uint32_t{});
 	memory.preauthorise_stack_read(uint32_t{});
-
-	memory.preauthorise_read(uint32_t{}, uint32_t{});
-	memory.preauthorise_write(uint32_t{}, uint32_t{});
 
 	memory.preauthorise_read(Source{}, AddressT{}, uint32_t{});
 	memory.preauthorise_write(Source{}, AddressT{}, uint32_t{});
@@ -245,7 +267,7 @@ template <
 >
 requires is_context<ContextT>
 void interrupt(
-	int index,
+	Exception exception,
 	ContextT &context
 );
 
