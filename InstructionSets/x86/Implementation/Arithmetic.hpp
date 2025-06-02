@@ -9,7 +9,7 @@
 #pragma once
 
 #include "InstructionSets/x86/AccessType.hpp"
-#include "InstructionSets/x86/Interrupts.hpp"
+#include "InstructionSets/x86/Exceptions.hpp"
 #include "InstructionSets/x86/Perform.hpp"
 
 #include "Numeric/Carry.hpp"
@@ -92,11 +92,11 @@ void test(
 	/*
 		The OF and CF flags are cleared to 0.
 		The SF, ZF, and PF flags are set according to the result (see the “Operation” section above).
-		The state of the AF flag is undefined.
+		The state of the AF flag is formally undefined but known to be reset.
 	*/
 	const IntT result = destination & source;
 
-	context.flags.template set_from<Flag::Carry, Flag::Overflow>(0);
+	context.flags.template set_from<Flag::Carry, Flag::Overflow, Flag::AuxiliaryCarry>(0);
 	context.flags.template set_from<IntT, Flag::Zero, Flag::Sign, Flag::ParityOdd>(result);
 }
 
@@ -173,10 +173,11 @@ void divide_error(ContextT &context) {
 	//
 	// 80286-style: throw the divide error, allowing the caller to insert
 	// additional context (primarily: IP of this instruction, not the next).
+	constexpr auto exception = Exception::exception<Vector::DivideError>();
 	if constexpr (uses_8086_exceptions(ContextT::model)) {
-		interrupt(Interrupt::DivideError, context);
+		interrupt(exception, context);
 	} else {
-		throw Exception(Interrupt::DivideError);
+		throw exception;
 	}
 }
 
