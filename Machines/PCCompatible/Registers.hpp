@@ -13,6 +13,8 @@
 #include "InstructionSets/x86/Model.hpp"
 #include "Numeric/RegisterSizes.hpp"
 
+#include <cassert>
+
 namespace PCCompatible {
 
 template <InstructionSet::x86::Model>
@@ -88,9 +90,16 @@ struct Registers<InstructionSet::x86::Model::i80186>: public Registers<Instructi
 template <>
 struct Registers<InstructionSet::x86::Model::i80286>: public Registers<InstructionSet::x86::Model::i80186> {
 public:
+	using DescriptorTable = InstructionSet::x86::DescriptorTable;
+	using DescriptorTablePointer = InstructionSet::x86::DescriptorTablePointer;
+
 	void reset() {
 		Registers<InstructionSet::x86::Model::i80186>::reset();
 		machine_status_ = 0;
+		interrupt_ = DescriptorTablePointer{
+			.limit = 256 * 4,
+			.base = 0
+		};
 	}
 
 	uint16_t msw() const {	return machine_status_;	}
@@ -100,32 +109,42 @@ public:
 			msw;
 	}
 
-	using DescriptorTable = InstructionSet::x86::DescriptorTable;
-	using DescriptorTableLocation = InstructionSet::x86::DescriptorTablePointer;
+	uint16_t ldtr() const {	return ldtr_;	}
+	void set_ldtr(const uint16_t ldtr) {
+		ldtr_ = ldtr;
+	}
 
-	template <DescriptorTable table>
-	void set(const DescriptorTableLocation location) {
-		static constexpr bool is_global = table == DescriptorTable::Global;
-		static_assert(is_global || table == DescriptorTable::Interrupt);
-		auto &target = is_global ? global_ : interrupt_;
-		target = location;
+	int privilege_level() const {
+		return 0;	// TODO.
+	}
+	void set_privilege_level(int) {
+		// TODO.
 	}
 
 	template <DescriptorTable table>
-	const DescriptorTableLocation &get() const {
-		if constexpr (table == DescriptorTable::Global) {
-			return global_;
-		} else if constexpr (table == DescriptorTable::Interrupt) {
-			return interrupt_;
-		} else {
-			static_assert(table == DescriptorTable::Local);
-			return local_;
+	void set(const DescriptorTablePointer location) {
+		switch(table) {
+			case DescriptorTable::Local:		local_ = location; 		break;
+			case DescriptorTable::Global:		global_ = location; 	break;
+			case DescriptorTable::Interrupt:	interrupt_ = location;	break;
+		}
+	}
+
+	template <DescriptorTable table>
+	const DescriptorTablePointer &get() const {
+		switch(table) {
+			case DescriptorTable::Local:		return local_;
+			case DescriptorTable::Global:		return global_;
+			default:
+				assert(table == DescriptorTable::Interrupt);
+				return interrupt_;
 		}
 	}
 
 private:
 	uint16_t machine_status_;
-	DescriptorTableLocation global_, interrupt_, local_;
+	DescriptorTablePointer global_, interrupt_, local_;
+	uint16_t ldtr_;
 };
 
 }
